@@ -1,0 +1,46 @@
+const express = require("express");
+const router = express.Router();
+const authmiddleware = require("../middleware/authmiddleware");
+const { upload } = require("../storage/Storageconfig");
+
+const {
+  sendGroupMessage,
+  sendPrivateMessage,
+  sendPrivatefile,
+  getGroupMessages,
+  getPrivateMessages,
+  getUserConversations,
+  getUnreadMessages,
+  markMessagesAsRead,
+  getUnreadCount,
+  getAllUsers,
+  syncmarking,
+} = require("../controller/messagecontroller");
+const { streamOrDownloadFile } = require("../controller/fileController");
+
+// All routes require authentication
+router.use(authmiddleware);
+
+// Group messages
+router.post("/group/:group_id", sendGroupMessage);
+router.get("/group/:group_id", getGroupMessages);
+
+// Private messages
+
+router.post("/file/private", upload.single("file"), sendPrivatefile);
+router.post("/private/:receiver_id", sendPrivateMessage);
+router.get("/private/:other_user_id", getPrivateMessages);
+
+// Conversations and inbox
+router.get("/conversations", getUserConversations);
+router.get("/unread-count", getUnreadCount);
+router.get("/users/all", getAllUsers);
+router.get("/unread", getUnreadMessages);
+router.get("/syncread/:otheruserid", syncmarking);
+router.get("/file/download/:messageId", streamOrDownloadFile);
+
+// Mark messages as read
+router.put("/read/group/:group_id", markMessagesAsRead);
+router.put("/read/private/:message_id", markMessagesAsRead);
+
+module.exports = router;
