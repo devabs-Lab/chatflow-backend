@@ -127,6 +127,8 @@ app.use("/api/users", userroutes);
 // group routes middleware
 app.use("/api/groups", grouproutes);
 
+app.use("/uploads", express.static("uploads"));
+
 // message routes middleware
 app.use("/api/messages", messageroutes);
 

@@ -8,15 +8,20 @@ async function streamOrDownloadFile(req, res) {
   try {
     const { messageId } = req.params;
     const userId = req.user?.userid; // auth middleware required
-
+    console.log("File request for message ID:", messageId, "by user:", userId);
     // 1) Fetch DB row
+    if (messageId.includes("temp-")) {
+      return res.status(400).json({ error: "Invalid message ID" });
+    }
     const { rows } = await pool.query("SELECT * FROM messages WHERE id = $1", [
       messageId,
     ]);
+
     if (!rows[0]) return res.status(404).json({ error: "Message not found" });
     const msg = rows[0];
 
     // 2) Authorization: only sender or receiver
+
     if (msg.sender_id !== userId && msg.receiver_id !== userId) {
       return res.status(403).json({ error: "Forbidden" });
     }
@@ -26,6 +31,9 @@ async function streamOrDownloadFile(req, res) {
     const filename = path.basename(msg.fileurl); // sanitize
     const fullPath = path.join(uploadsDir, filename);
 
+    // console.log("Resolved file path:", fullPath, filename, uploadsDir);
+    // ``;
+
     if (!fs.existsSync(fullPath)) {
       return res.status(404).json({ error: "File missing on server" });
     }
@@ -33,24 +41,34 @@ async function streamOrDownloadFile(req, res) {
     // 4) File stats
     const stat = fs.statSync(fullPath);
     const fileSize = stat.size;
-    const mimeType = mime.lookup(fullPath) || "application/octet-stream";
+    let mimeType = mime.lookup(fullPath) || "application/octet-stream";
+
+    // FIX broken mp4 mime
+
+    console.log(mimeType);
+
+    if (mimeType === "application/mp4") mimeType = "video/mp4";
+
+    const isMedia =
+      mimeType.startsWith("video/") || mimeType.startsWith("audio/");
 
     // 5) Streaming logic (video/audio) vs normal file
     const range = req.headers.range;
 
-    if (
-      range &&
-      (mimeType.startsWith("video/") || mimeType.startsWith("audio/"))
-    ) {
+    // console.log(range, isMedia);
+
+    if (range && isMedia) {
       // --- STREAMING ---
+
+      console.log("Streaming with range:", range, "and mime type:", isMedia);
       const parts = range.replace(/bytes=/, "").split("-");
       const start = parseInt(parts[0], 10);
       const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
       if (start >= fileSize) {
         return res.status(416).send("Requested range not satisfiable");
       }
+
       const chunkSize = end - start + 1;
-      const stream = fs.createReadStream(fullPath, { start, end });
 
       res.writeHead(206, {
         "Content-Range": `bytes ${start}-${end}/${fileSize}`,
@@ -59,9 +77,17 @@ async function streamOrDownloadFile(req, res) {
         "Content-Type": mimeType,
       });
 
-      stream.pipe(res);
+      fs.createReadStream(fullPath, { start, end }).pipe(res);
+      return;
     } else {
       // --- FULL DOWNLOAD ---
+
+      console.log(
+        "Full download for file:",
+        filename,
+        "with mime type:",
+        mimeType,
+      );
       res.writeHead(200, {
         "Content-Length": fileSize,
         "Content-Type": mimeType,

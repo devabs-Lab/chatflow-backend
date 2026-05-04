@@ -1,7 +1,7 @@
 const pool = require("../db/dbconfig");
 const { v4: uuidv4 } = require("uuid");
-const { io } = require("../app.js");
-
+const { io, onlineUsers } = require("../app.js");
+const { generateVideoThumbnail } = require("../utils/videoThumb");
 // Send a message to a group
 
 const sendGroupMessage = async (req, res) => {
@@ -13,7 +13,7 @@ const sendGroupMessage = async (req, res) => {
     // Check if user is a member of the group
     const member = await client.query(
       "SELECT * FROM group_members WHERE group_id = $1 AND user_id = $2",
-      [group_id, sender_id]
+      [group_id, sender_id],
     );
 
     if (member.rows.length === 0) {
@@ -24,13 +24,13 @@ const sendGroupMessage = async (req, res) => {
     const newMessage = await client.query(
       `INSERT INTO messages (sender_id, group_id, content, message_type) 
        VALUES ($1, $2, $3, $4) RETURNING *`,
-      [sender_id, group_id, content, message_type]
+      [sender_id, group_id, content, message_type],
     );
 
     // Get sender info for the response
     const sender = await client.query(
       "SELECT username FROM users WHERE userid = $1",
-      [sender_id]
+      [sender_id],
     );
 
     const messageWithSender = {
@@ -71,7 +71,7 @@ const sendPrivateMessage = async (req, res) => {
     // Check if receiver exists
     const receiver = await client.query(
       "SELECT 1 FROM users WHERE userid = $1",
-      [receiver_id]
+      [receiver_id],
     );
 
     if (receiver.rows.length === 0) {
@@ -87,13 +87,13 @@ const sendPrivateMessage = async (req, res) => {
     const newMessage = await client.query(
       `INSERT INTO messages (sender_id, receiver_id, content, message_type, delivered_at) 
        VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [sender_id, receiver_id, content, message_type, finalDeliveredAt]
+      [sender_id, receiver_id, content, message_type, finalDeliveredAt],
     );
 
     // Get sender info for the responserrs
     const sender = await client.query(
       "SELECT username FROM users WHERE userid = $1",
-      [sender_id]
+      [sender_id],
     );
 
     // console.log(newMessage.rows[0]);
@@ -102,6 +102,12 @@ const sendPrivateMessage = async (req, res) => {
       ...newMessage.rows[0],
       sender_username: sender.rows[0].username,
     };
+
+    const receiverSockets = onlineUsers.get(receiver_id) || [];
+
+    receiverSockets.forEach((sId) =>
+      io.to(sId).emit("receive-private-message", messageWithSender),
+    );
 
     res.status(201).json({
       message: "Message sent successfully",
@@ -115,7 +121,11 @@ const sendPrivateMessage = async (req, res) => {
   }
 };
 
+const uploadCache = new Map();
+
 const sendPrivatefile = async (req, res) => {
+  const client = await pool.connect();
+
   // multer gives us file + text fields
   const file = req.file; // single file
   const {
@@ -123,22 +133,41 @@ const sendPrivatefile = async (req, res) => {
     receiver_id,
     message_type,
     delivered_at,
-    content, // optional
+    tempId,
+    width,
+    height,
+    aspect_ratio,
+    duration,
   } = req.body;
 
   if (!file) {
     return res.status(400).json({ error: "No file uploaded" });
   }
 
+  if (uploadCache.has(tempId)) {
+    console.log("Duplicate prevented:", tempId);
+
+    return res.json(uploadCache.get(tempId));
+  }
   // i create file URL (for frontend to access later)
   const fileurl = `/uploads/${file.filename}`;
+  let thumbUrl = null;
+
   if (!fileurl) return;
+
   try {
+    if (message_type === "video") {
+      thumbUrl = await generateVideoThumbnail(file.path, file.filename);
+    }
+
+    // console.log("Generated thumbnail URL:", file.path);
+
     // save to DB
-    const result = await pool.query(
+    const result = await client.query(
       `INSERT INTO messages 
-       (sender_id, receiver_id, message_type, delivered_at, filename, filesize, fileurl, is_read) 
-       VALUES ($1,$2,$3,$4,$5,$6,$7,false)
+       (sender_id, receiver_id, message_type, delivered_at, filename, filesize, fileurl, thumbUrl, width,
+        height, aspect_ratio, duration, is_read) 
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,false)
        RETURNING *`,
       [
         sender_id,
@@ -148,11 +177,35 @@ const sendPrivatefile = async (req, res) => {
         file.originalname,
         file.size,
         fileurl,
-      ]
+        thumbUrl,
+        width,
+        height,
+        aspect_ratio,
+        duration,
+      ],
     );
     // console.log(result.rows[0]);
     // return saved message
-    res.json(result.rows[0]);
+    const savedMessage = result.rows[0];
+
+    // SAVE IN CACHE
+    uploadCache.set(tempId, savedMessage);
+
+    const receiverSockets = onlineUsers.get(receiver_id) || [];
+
+    receiverSockets.forEach((sId) =>
+      io.to(sId).emit("receive-private-message", savedMessage),
+    );
+
+    // Optional cleanup after 1 hour
+    // setTimeout(
+    //   () => {
+    //     uploadCache.delete(tempId);
+    //   },
+    //   1000 * 60 * 60,
+    // );
+
+    res.json(savedMessage);
   } catch (err) {
     console.error("File upload error:", err);
     res.status(500).json({ error: "File upload failed" });
@@ -165,11 +218,11 @@ const getAllUsers = async (req, res) => {
   const client = await pool.connect();
   try {
     const users = await client.query(
-      `SELECT userid, username
+      `SELECT userid, username, avatar_url, bio, phone, department, status, last_seen
        FROM users
        WHERE userid != $1
        ORDER BY username ASC`,
-      [user_id]
+      [user_id],
     );
 
     res.json(users.rows);
@@ -192,7 +245,7 @@ const getUnreadMessages = async (req, res) => {
          WHERE m.receiver_id = $1
            AND m.is_read = false
          ORDER BY COALESCE(m.delivered_at, m.created_at) ASC`,
-      [userId]
+      [userId],
     );
 
     res.json(messages.rows);
@@ -216,7 +269,7 @@ const getGroupMessages = async (req, res) => {
     // Check if user is a member of the group
     const member = await client.query(
       "SELECT * FROM group_members WHERE group_id = $1 AND user_id = $2",
-      [group_id, user_id]
+      [group_id, user_id],
     );
 
     if (member.rows.length === 0) {
@@ -231,7 +284,7 @@ const getGroupMessages = async (req, res) => {
        WHERE m.group_id = $1
        ORDER BY m.created_at DESC
        LIMIT $2 OFFSET $3`,
-      [group_id, parseInt(limit), parseInt(offset)]
+      [group_id, parseInt(limit), parseInt(offset)],
     );
 
     res.json(messages.rows.reverse()); // Reverse to get chronological order
@@ -254,7 +307,7 @@ const getPrivateMessages = async (req, res) => {
     // Check if other user exists
     const otherUser = await client.query(
       "SELECT 1 FROM users WHERE userid = $1",
-      [other_user_id]
+      [other_user_id],
     );
 
     if (otherUser.rows.length === 0) {
@@ -268,6 +321,7 @@ const getPrivateMessages = async (req, res) => {
         SELECT
           m.*,
           u.username AS sender_username,
+          u.avatar_url AS sender_avatar,
           ROW_NUMBER() OVER (
             ORDER BY COALESCE(m.delivered_at, m.created_at) ASC
           ) AS rn,
@@ -283,7 +337,7 @@ const getPrivateMessages = async (req, res) => {
       ORDER BY rn
       LIMIT $3;
       `,
-      [user_id, other_user_id, parseInt(limit), parseInt(offset)]
+      [user_id, other_user_id, parseInt(limit), parseInt(offset)],
     );
     // console.log(messages.rows);
     res.json(messages.rows);
@@ -321,7 +375,7 @@ const getUserConversations = async (req, res) => {
        WHERE m.receiver_id = $1 OR m.sender_id = $1
        GROUP BY other_user_id, u.username
        ORDER BY last_message_time DESC`,
-      [user_id]
+      [user_id],
     );
 
     res.json(conversations.rows);
@@ -346,7 +400,7 @@ const syncmarking = async (req, res) => {
        AND sender_id = $2
        AND is_read = TRUE`,
 
-      [userId, otheruserid]
+      [userId, otheruserid],
     );
 
     const lastReadTime = getlastsync.rows[0].last_read_time;
@@ -363,7 +417,7 @@ const syncmarking = async (req, res) => {
           AND sender_id = $1
           AND is_read = TRUE
           AND delivered_at > $3;`,
-      [userId, otheruserid, lastReadTime]
+      [userId, otheruserid, lastReadTime],
     );
 
     res.json(syncmessage.rows);
@@ -382,17 +436,20 @@ const markMessagesAsRead = async (req, res) => {
   const user_id = req.user.userid;
   const client = await pool.connect();
   const { io, onlineUsers } = require("../app.js");
+  console.log(message_id, "and", user_id);
 
   try {
     // Verify the message belongs to this user as receiver
     const { rows } = await client.query(
       `SELECT receiver_id FROM messages WHERE id = $1`,
-      [message_id]
+      [message_id],
     );
-
+    console.log(rows.length);
     if (rows.length === 0) {
       return res.status(404).json({ error: "Message not found" });
     }
+    console.log(rows[0].receiver_id !== user_id);
+    console.log(rows[0].receiver_id !== user_id);
 
     if (rows[0].receiver_id !== user_id) {
       return res.status(403).json({ error: "Not authorized" });
@@ -404,21 +461,23 @@ const markMessagesAsRead = async (req, res) => {
        SET is_read = true, read_at = NOW()
        WHERE id = $1 AND is_read = false
        RETURNING *`,
-      [message_id]
+      [message_id],
     );
-
+    console.log(updatedRows.length);
     if (updatedRows.length) {
       console.log(updatedRows.length);
+      console.log("why is this happening");
       const senderSockets = onlineUsers.get(updatedRows[0].sender_id) || [];
       senderSockets.forEach((sId) =>
         io.to(sId).emit("message-read", {
           messageId: message_id,
           receiver_id: updatedRows[0].receiver_id,
-        })
+        }),
       );
 
       return res.json({ success: true, messageId: message_id });
     }
+
     return res.json({
       success: true,
       messageId: message_id,
@@ -440,7 +499,7 @@ const getUnreadCount = async (req, res) => {
     // Get unread private messages
     const privateUnread = await client.query(
       "SELECT COUNT(*) FROM messages WHERE receiver_id = $1 AND is_read = false",
-      [user_id]
+      [user_id],
     );
 
     // Get unread group messages (for groups user is member of)
@@ -449,7 +508,7 @@ const getUnreadCount = async (req, res) => {
        FROM messages m
        JOIN group_members gm ON m.group_id = gm.group_id
        WHERE gm.user_id = $1 AND m.sender_id != $1 AND m.is_read = false`,
-      [user_id]
+      [user_id],
     );
 
     const totalUnread =

@@ -1,8 +1,8 @@
 const express = require("express");
 const router = express.Router();
 const authmiddleware = require("../middleware/authmiddleware");
+const verifyStreamToken = require("../middleware/streamAuth");
 const { upload } = require("../storage/Storageconfig");
-
 const {
   sendGroupMessage,
   sendPrivateMessage,
@@ -19,6 +19,7 @@ const {
 const { streamOrDownloadFile } = require("../controller/fileController");
 
 // All routes require authentication
+
 router.use(authmiddleware);
 
 // Group messages
@@ -30,6 +31,7 @@ router.get("/group/:group_id", getGroupMessages);
 router.post("/file/private", upload.single("file"), sendPrivatefile);
 router.post("/private/:receiver_id", sendPrivateMessage);
 router.get("/private/:other_user_id", getPrivateMessages);
+router.get("/file/download/:messageId", streamOrDownloadFile);
 
 // Conversations and inbox
 router.get("/conversations", getUserConversations);
@@ -37,7 +39,6 @@ router.get("/unread-count", getUnreadCount);
 router.get("/users/all", getAllUsers);
 router.get("/unread", getUnreadMessages);
 router.get("/syncread/:otheruserid", syncmarking);
-router.get("/file/download/:messageId", streamOrDownloadFile);
 
 // Mark messages as read
 router.put("/read/group/:group_id", markMessagesAsRead);

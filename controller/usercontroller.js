@@ -15,12 +15,12 @@ async function register(req, res) {
   try {
     const usernameExists = await pool.query(
       "SELECT userid FROM users WHERE username = $1",
-      [username]
+      [username],
     );
 
     const emailExists = await pool.query(
       "SELECT userid FROM users WHERE email = $1",
-      [email]
+      [email],
     );
     if (usernameExists.rows.length > 0) {
       return res
@@ -44,7 +44,7 @@ async function register(req, res) {
 
     await pool.query(
       "INSERT INTO users(username, firstname, lastname , email ,password) VALUES ($1,$2,$3,$4,$5)",
-      [username, firstname, lastname, email, hashedpassword]
+      [username, firstname, lastname, email, hashedpassword],
     );
 
     return res.status(StatusCodes.CREATED).json({ msg: "user created" });
@@ -68,7 +68,7 @@ async function login(req, res) {
   try {
     const userResult = await pool.query(
       "select username,userid,password from users where email = $1",
-      [email]
+      [email],
     );
     const user = userResult.rows[0];
 
@@ -92,10 +92,34 @@ async function login(req, res) {
     const token = jwt.sign({ username, userid }, process.env.JWT_SECRET, {
       expiresIn: "1d",
     });
-    // console.log(token, username, userid);
-    return res
-      .status(StatusCodes.OK)
-      .json({ msg: "user login successfully ", token, username, userid });
+
+    const result = await pool.query(
+      `
+      SELECT 
+        userid,
+        username,
+        avatar_url,
+        bio,
+        department,
+        phone
+      FROM users
+      WHERE userid = $1
+      `,
+      [userid],
+    );
+
+    const users = result.rows[0];
+
+    res.status(StatusCodes.OK).json({
+      token,
+      msg: "valid user login successfully ",
+      userid: users.userid,
+      username: users.username,
+      avatar_url: users.avatar_url,
+      bio: users.bio,
+      department: users.department,
+      phone: users.phone,
+    });
   } catch (error) {
     console.log(error.message);
     return res.status(StatusCodes.BAD_REQUEST);
@@ -108,7 +132,7 @@ async function usernameprovider(req, res) {
   try {
     const userResult = await pool.query(
       "select username from users where userid = $1",
-      [userid]
+      [userid],
     );
     const user = userResult.rows[0];
     res.status(StatusCodes.OK).json(user);
@@ -121,9 +145,101 @@ async function usernameprovider(req, res) {
 }
 
 async function check(req, res) {
-  const username = req.user.username;
-  const userid = req.user.userid;
-  res.status(StatusCodes.OK).json({ msg: "valid user", username, userid });
+  try {
+    const userid = req.user.userid;
+
+    const result = await pool.query(
+      `
+      SELECT 
+        userid,
+        username,
+        avatar_url,
+        bio,
+        department,
+        phone
+      FROM users
+      WHERE userid = $1
+      `,
+      [userid],
+    );
+
+    const user = result.rows[0];
+
+    res.status(StatusCodes.OK).json({
+      msg: "valid user",
+      userid: user.userid,
+      username: user.username,
+      avatar_url: user.avatar_url,
+      bio: user.bio,
+      department: user.department,
+      phone: user.phone,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      msg: "Server error",
+    });
+  }
 }
 
-module.exports = { register, login, check, usernameprovider };
+const updateUserProfile = async (req, res) => {
+  const userId = req.user.userid;
+  const { bio, phone, department } = req.body;
+
+  try {
+    const result = await pool.query(
+      `UPDATE users 
+       SET bio = $1, phone = $2, department = $3, updated_at = CURRENT_TIMESTAMP
+       WHERE userid = $4
+       RETURNING userid, username, avatar_url, bio, phone, department`,
+      [bio, phone, department, userId],
+    );
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error("Error updating profile:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+const uploadAvatar = async (req, res) => {
+  const userId = req.user.userid;
+  const file = req.file;
+
+  console.log(
+    "Received avatar upload request for user:",
+    userId,
+    "with file:",
+    file,
+  );
+
+  if (!file) {
+    return res.status(400).json({ error: "No file uploaded" });
+  }
+
+  const avatarUrl = `/uploads/${file.filename}`;
+
+  try {
+    await pool.query("UPDATE users SET avatar_url = $1 WHERE userid = $2", [
+      avatarUrl,
+      userId,
+    ]);
+
+    res.json({
+      message: "Avatar updated",
+      avatar_url: avatarUrl,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to update avatar" });
+  }
+};
+
+module.exports = {
+  register,
+  login,
+  check,
+  usernameprovider,
+  updateUserProfile,
+  uploadAvatar,
+};
