@@ -217,7 +217,8 @@ const uploadAvatar = async (req, res) => {
     return res.status(400).json({ error: "No file uploaded" });
   }
 
-  const avatarUrl = `/uploads/${file.filename}`;
+  // const avatarUrl = `/uploads/${file.filename}`; this is for local streaming
+  const avatarUrl = file.path || file.url;
 
   try {
     await pool.query("UPDATE users SET avatar_url = $1 WHERE userid = $2", [

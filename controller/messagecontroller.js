@@ -1,7 +1,7 @@
 const pool = require("../db/dbconfig");
 const { v4: uuidv4 } = require("uuid");
 const { io, onlineUsers } = require("../app.js");
-const { generateVideoThumbnail } = require("../utils/videoThumb");
+// const { generateVideoThumbnail } = require("../utils/videoThumb");
 // Send a message to a group
 
 const sendGroupMessage = async (req, res) => {
@@ -150,19 +150,23 @@ const sendPrivatefile = async (req, res) => {
     return res.json(uploadCache.get(tempId));
   }
   // i create file URL (for frontend to access later)
-  const fileurl = `/uploads/${file.filename}`;
-  let thumbUrl = null;
+  // const fileurl = `/uploads/${file.filename}`;
+  const fileurl = file.path; // path for cloudinary
+  // let thumbUrl = null;
 
   if (!fileurl) return;
 
   try {
+    // for cloudinary we don't need this thumbnail
+
+    // if (message_type === "video") {
+    //   thumbUrl = await generateVideoThumbnail(file.path, file.filename);
+    // }
+
     if (message_type === "video") {
-      thumbUrl = await generateVideoThumbnail(file.path, file.filename);
+      thumbUrl = fileurl.replace("/upload/", "/upload/so_1/");
     }
 
-    // console.log("Generated thumbnail URL:", file.path);
-
-    // save to DB
     const result = await client.query(
       `INSERT INTO messages 
        (sender_id, receiver_id, message_type, delivered_at, filename, filesize, fileurl, thumbUrl, width,
@@ -211,6 +215,105 @@ const sendPrivatefile = async (req, res) => {
     res.status(500).json({ error: "File upload failed" });
   }
 };
+
+// Send a group file
+// const sendGroupFile = async (req, res) => {
+//   const client = await pool.connect();
+
+//   // multer gives us file + text fields
+//   const file = req.file; // single file
+//   const {
+//     sender_id,
+//     group_id,
+//     message_type,
+//     delivered_at,
+//     tempId,
+//     width,
+//     height,
+//     aspect_ratio,
+//     duration,
+//   } = req.body;
+
+//   if (!file) {
+//     return res.status(400).json({ error: "No file uploaded" });
+//   }
+
+//   if (uploadCache.has(tempId)) {
+//     console.log("Duplicate prevented:", tempId);
+//     return res.json(uploadCache.get(tempId));
+//   }
+
+//   // Check if user is a member of the group
+//   const member = await client.query(
+//     "SELECT * FROM group_members WHERE group_id = $1 AND user_id = $2",
+//     [group_id, sender_id],
+//   );
+
+//   if (member.rows.length === 0) {
+//     return res.status(403).json({ error: "Not a member of this group" });
+//   }
+
+//   // i create file URL (for frontend to access later)
+//   const fileurl = `/uploads/${file.filename}`;
+//   let thumbUrl = null;
+
+//   if (!fileurl) return;
+
+//   try {
+//     if (message_type === "video") {
+//       thumbUrl = await generateVideoThumbnail(file.path, file.filename);
+//     }
+
+//     // save to DB
+//     const result = await client.query(
+//       `INSERT INTO messages
+//        (sender_id, group_id, message_type, delivered_at, filename, filesize, fileurl, thumbUrl, width,
+//         height, aspect_ratio, duration, is_read)
+//        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,false)
+//        RETURNING *`,
+//       [
+//         sender_id,
+//         group_id,
+//         message_type,
+//         delivered_at,
+//         file.originalname,
+//         file.size,
+//         fileurl,
+//         thumbUrl,
+//         width,
+//         height,
+//         aspect_ratio,
+//         duration,
+//       ],
+//     );
+
+//     const savedMessage = result.rows[0];
+
+//     // Get sender info for the response
+//     const sender = await client.query(
+//       "SELECT username FROM users WHERE userid = $1",
+//       [sender_id],
+//     );
+
+//     const messageWithSender = {
+//       ...savedMessage,
+//       sender_username: sender.rows[0].username,
+//     };
+
+//     // SAVE IN CACHE
+//     uploadCache.set(tempId, messageWithSender);
+
+//     // Emit to group room
+//     io.to(`group-${group_id}`).emit("receive-group-message", messageWithSender);
+
+//     res.json(messageWithSender);
+//   } catch (err) {
+//     console.error("Group file upload error:", err);
+//     res.status(500).json({ error: "File upload failed" });
+//   } finally {
+//     client.release();
+//   }
+// };
 
 // Get all users (for starting new chats)
 const getAllUsers = async (req, res) => {
