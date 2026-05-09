@@ -15,7 +15,10 @@ app.use(express.json());
 // Socket.IO setup
 const io = new Server(server, {
   cors: {
-    origin: ["http://localhost:5173", "https://your-netlify-app.netlify.app"], // Add your Netlify URL
+    origin: [
+      "http://localhost:5173",
+      "https://uopeoplechatting-app.netlify.app",
+    ], // Add your Netlify URL
     methods: ["GET", "POST"],
   },
 });
@@ -29,7 +32,7 @@ const getAllUserChats = async (userId) => {
        FROM users
        WHERE userid != $1
        ORDER BY username ASC`,
-      [userId]
+      [userId],
     );
     // return array of user IDs
     return rows.map((r) => r.userid);
@@ -55,7 +58,7 @@ io.on("connection", async (socket) => {
       const roomId = [userId, otherUserId].sort().join("-");
       socket.join(`private-${roomId}`);
       console.log(
-        `Socket ${socket.id} auto-joined private chat room ${roomId}`
+        `Socket ${socket.id} auto-joined private chat room ${roomId}`,
       );
     });
   } catch (err) {
@@ -102,7 +105,7 @@ io.on("connection", async (socket) => {
     const arr = onlineUsers.get(userId) || [];
     onlineUsers.set(
       userId,
-      arr.filter((id) => id !== socket.id)
+      arr.filter((id) => id !== socket.id),
     );
     if (onlineUsers.get(userId).length === 0) onlineUsers.delete(userId);
   });
@@ -135,7 +138,7 @@ app.use("/api/messages", messageroutes);
 async function start() {
   try {
     const result = await pool.query(
-      "SELECT 'test connection to pg' As message"
+      "SELECT 'test connection to pg' As message",
     );
     console.log("PostgreSQL DB Connection Successful:", result.rows[0].message); // Just to confirm DB is connected
 
