@@ -142,7 +142,7 @@ async function start() {
     );
     console.log("PostgreSQL DB Connection Successful:", result.rows[0].message); // Just to confirm DB is connected
 
-    server.listen(port, () => {
+    server.listen(port, "0.0.0.0", () => {
       console.log(`Server is listening on port ${port}`);
     });
   } catch (error) {
