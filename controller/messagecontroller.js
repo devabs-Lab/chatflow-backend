@@ -140,6 +140,11 @@ const sendPrivatefile = async (req, res) => {
     duration,
   } = req.body;
 
+  console.log("UPLOAD FILE:", file);
+
+  console.log("FILE OBJECT:", file);
+  console.log("FILEURL:", fileurl);
+
   if (!file) {
     return res.status(400).json({ error: "No file uploaded" });
   }
@@ -151,7 +156,7 @@ const sendPrivatefile = async (req, res) => {
   }
   // i create file URL (for frontend to access later)
   // const fileurl = `/uploads/${file.filename}`;
-  const fileurl = file.path; // path for cloudinary
+  const fileurl = file?.path || file?.secure_url || file?.url; // path for cloudinary
   // let thumbUrl = null;
 
   if (!fileurl) return;
