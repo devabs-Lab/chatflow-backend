@@ -156,7 +156,7 @@ const sendPrivatefile = async (req, res) => {
   // i create file URL (for frontend to access later)
   // const fileurl = `/uploads/${file.filename}`;
   const fileurl = file?.path || file?.secure_url || file?.url; // path for cloudinary
-  // let thumbUrl = null;
+  let thumbUrl = null;
 
   console.log("FILEURL:", fileurl);
 
