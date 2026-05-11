@@ -1,6 +1,10 @@
 const pool = require("../db/dbconfig");
 const { v4: uuidv4 } = require("uuid");
 const { io, onlineUsers } = require("../app.js");
+const {
+  addSignedAvatarUrls,
+  createSignedStorageUrl,
+} = require("../utils/storageUrls");
 // const { generateVideoThumbnail } = require("../utils/videoThumb");
 // Send a message to a group
 
@@ -123,6 +127,8 @@ const sendPrivateMessage = async (req, res) => {
 
 const uploadCache = new Map();
 
+const supabase = require("../config/supabase");
+
 const sendPrivatefile = async (req, res) => {
   const client = await pool.connect();
 
@@ -153,9 +159,29 @@ const sendPrivatefile = async (req, res) => {
 
     return res.json(uploadCache.get(tempId));
   }
-  // i create file URL (for frontend to access later)
-  // const fileurl = `/uploads/${file.filename}`;
-  const fileurl = file?.path || file?.secure_url || file?.url; // path for cloudinary
+  // ===============================
+  // 1. Upload to Supabase Storage
+  // ===============================
+  const fileName = `${Date.now()}-${file.originalname.replace(/\s+/g, "-")}`;
+  const filePath = fileName;
+
+  const { data, error } = await supabase.storage
+    .from("chat-files") // bucket name
+    .upload(filePath, file.buffer, {
+      contentType: file.mimetype,
+      upsert: false,
+    });
+
+  if (error) {
+    console.error("Supabase upload error:", error);
+    return res.status(500).json({ error: "Upload failed" });
+  }
+
+  // ===============================
+  // 2. Save ONLY PATH in DB
+  // ===============================
+  const fileurl = data.path; // IMPORTANT: store path, NOT full URL
+  console.log("Supabase file path:", fileurl);
   let thumbUrl = null;
 
   console.log("FILEURL:", fileurl);
@@ -165,18 +191,14 @@ const sendPrivatefile = async (req, res) => {
   try {
     // for cloudinary we don't need this thumbnail
 
-    // if (message_type === "video") {
-    //   thumbUrl = await generateVideoThumbnail(file.path, file.filename);
-    // }
-
     if (message_type === "video") {
       thumbUrl = fileurl.replace("/upload/", "/upload/so_1/");
     }
 
     const result = await client.query(
-      `INSERT INTO messages 
+      `INSERT INTO messages
        (sender_id, receiver_id, message_type, delivered_at, filename, filesize, fileurl, thumbUrl, width,
-        height, aspect_ratio, duration, is_read) 
+        height, aspect_ratio, duration, is_read)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,false)
        RETURNING *`,
       [
@@ -334,7 +356,7 @@ const getAllUsers = async (req, res) => {
       [user_id],
     );
 
-    res.json(users.rows);
+    res.json(await addSignedAvatarUrls(users.rows));
   } catch (error) {
     console.error("Error fetching users:", error);
     res.status(500).json({ error: "Internal server error" });
@@ -357,7 +379,14 @@ const getUnreadMessages = async (req, res) => {
       [userId],
     );
 
-    res.json(messages.rows);
+    const rows = await Promise.all(
+      messages.rows.map(async (message) => ({
+        ...message,
+        sender_avatar: await createSignedStorageUrl(message.sender_avatar),
+      })),
+    );
+
+    res.json(rows);
 
     // res.json(messageswithsender.rows);
   } catch (error) {

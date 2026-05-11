@@ -16,7 +16,7 @@ const {
   getAllUsers,
   syncmarking,
 } = require("../controller/messagecontroller");
-// const { streamOrDownloadFile } = require("../controller/fileController");
+const { streamOrDownloadFile } = require("../controller/fileController");
 
 // All routes require authentication
 
@@ -31,7 +31,7 @@ router.get("/group/:group_id", getGroupMessages);
 router.post("/file/private", upload.single("file"), sendPrivatefile);
 router.post("/private/:receiver_id", sendPrivateMessage);
 router.get("/private/:other_user_id", getPrivateMessages);
-// router.get("/file/download/:messageId", streamOrDownloadFile); for local or aws streaming
+router.get("/file/download/:messageId", streamOrDownloadFile); //for local or aws streaming
 
 // Conversations and inbox
 router.get("/conversations", getUserConversations);

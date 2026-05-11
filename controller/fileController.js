@@ -110,52 +110,111 @@
 
 // module.exports = { streamOrDownloadFile };
 
-const axios = require("axios");
+// const axios = require("axios");
+
+// // async function streamOrDownloadFile(req, res) {
+// //   try {
+// //     const { messageId } = req.params;
+// //     const userId = req.user.userid;
+
+// //     const { rows } = await pool.query("SELECT * FROM messages WHERE id = $1", [
+// //       messageId,
+// //     ]);
+
+// //     const msg = rows[0];
+
+// //     if (!msg) return res.status(404).json({ error: "Not found" });
+
+// //     if (msg.sender_id !== userId && msg.receiver_id !== userId) {
+// //       return res.status(403).json({ error: "Forbidden" });
+// //     }
+
+// //     const range = req.headers.range;
+
+// //     const headers = {};
+
+// //     if (range) {
+// //       headers.Range = range;
+// //     }
+
+// //     const response = await axios.get(msg.fileurl, {
+// //       responseType: "stream",
+// //       headers,
+// //     });
+
+// //     res.status(range ? 206 : 200);
+
+// //     res.setHeader("Content-Type", response.headers["content-type"]);
+// //     if (response.headers["content-length"]) {
+// //       res.setHeader("Content-Length", response.headers["content-length"]);
+// //     }
+
+// //     if (response.headers["accept-ranges"]) {
+// //       res.setHeader("Accept-Ranges", "bytes");
+// //     }
+
+// //     response.data.pipe(res);
+// //   } catch (err) {
+// //     console.error(err);
+// //     res.status(500).json({ error: "File streaming failed" });
+// //   }
+// // }
+
+const pool = require("../db/dbconfig");
+const supabase = require("../config/supabase"); // 👈 you must create this
 
 async function streamOrDownloadFile(req, res) {
   try {
     const { messageId } = req.params;
-    const userId = req.user.userid;
+    const userId = req.user?.userid;
 
+    console.log("DOWNLOAD ID:", messageId);
+
+    // 1. validate
+    if (!messageId || messageId.includes("temp-")) {
+      return res.status(400).json({ error: "Invalid message ID" });
+    }
+
+    // 2. get message
     const { rows } = await pool.query("SELECT * FROM messages WHERE id = $1", [
       messageId,
     ]);
 
     const msg = rows[0];
 
-    if (!msg) return res.status(404).json({ error: "Not found" });
+    if (!msg) {
+      return res.status(404).json({ error: "Message not found" });
+    }
 
+    // 3. auth check
     if (msg.sender_id !== userId && msg.receiver_id !== userId) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const range = req.headers.range;
-
-    const headers = {};
-
-    if (range) {
-      headers.Range = range;
+    // 4. ensure file exists in DB
+    if (!msg.fileurl) {
+      return res.status(404).json({ error: "File not found in storage" });
     }
 
-    const response = await axios.get(msg.fileurl, {
-      responseType: "stream",
-      headers,
-    });
+    // 5. create signed URL from Supabase
+    console.log("Generating signed URL for file:", msg.fileurl);
 
-    res.status(range ? 206 : 200);
+    const { data, error } = await supabase.storage
+      .from("chat-files") // 👈 your bucket name
+      .createSignedUrl(msg.fileurl, 60 * 60); // 1 hour
 
-    res.setHeader("Content-Type", response.headers["content-type"]);
-    if (response.headers["content-length"]) {
-      res.setHeader("Content-Length", response.headers["content-length"]);
+    if (error) {
+      console.error("Supabase error:", error);
+      return res.status(500).json({ error: "Failed to generate file URL" });
     }
 
-    if (response.headers["accept-ranges"]) {
-      res.setHeader("Accept-Ranges", "bytes");
-    }
+    // 6. optional: support streaming-like behavior (redirect)
 
-    response.data.pipe(res);
+    return res.redirect(data.signedUrl);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "File streaming failed" });
+    console.error("File controller error:", err);
+    return res.status(500).json({ error: "Internal server error" });
   }
 }
+
+module.exports = { streamOrDownloadFile };

@@ -2,6 +2,10 @@ const pool = require("../db/dbconfig");
 const bcrypt = require("bcrypt");
 const { StatusCodes } = require("http-status-codes");
 const jwt = require("jsonwebtoken");
+const {
+  addSignedAvatarUrl,
+  createSignedStorageUrl,
+} = require("../utils/storageUrls");
 
 async function register(req, res) {
   const { username, firstname, lastname, email, password } = req.body;
@@ -108,7 +112,7 @@ async function login(req, res) {
       [userid],
     );
 
-    const users = result.rows[0];
+    const users = await addSignedAvatarUrl(result.rows[0]);
 
     res.status(StatusCodes.OK).json({
       token,
@@ -163,7 +167,7 @@ async function check(req, res) {
       [userid],
     );
 
-    const user = result.rows[0];
+    const user = await addSignedAvatarUrl(result.rows[0]);
 
     res.status(StatusCodes.OK).json({
       msg: "valid user",
@@ -195,12 +199,14 @@ const updateUserProfile = async (req, res) => {
       [bio, phone, department, userId],
     );
 
-    res.json(result.rows[0]);
+    res.json(await addSignedAvatarUrl(result.rows[0]));
   } catch (error) {
     console.error("Error updating profile:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
+
+const supabase = require("../config/supabase");
 
 const uploadAvatar = async (req, res) => {
   const userId = req.user.userid;
@@ -218,11 +224,31 @@ const uploadAvatar = async (req, res) => {
   }
 
   // const avatarUrl = `/uploads/${file.filename}`; this is for local streaming
-  const avatarUrl = file.path || file.url;
+
+  const fileName = `${Date.now()}-${file.originalname.replace(/\s+/g, "-")}`;
+  const filePath = fileName;
+
+  const { data, error } = await supabase.storage
+    .from("chat-files") // bucket name
+    .upload(filePath, file.buffer, {
+      contentType: file.mimetype,
+      upsert: false,
+    });
+
+  if (error) {
+    console.error("Supabase upload error:", error);
+    return res.status(500).json({ error: "Upload failed" });
+  }
+
+  // ===============================
+  // 2. Save ONLY PATH in DB
+  // ===============================
+  const fileurl = data.path;
+  const avatarUrl = await createSignedStorageUrl(fileurl);
 
   try {
     await pool.query("UPDATE users SET avatar_url = $1 WHERE userid = $2", [
-      avatarUrl,
+      fileurl,
       userId,
     ]);
 

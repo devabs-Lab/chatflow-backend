@@ -22,22 +22,36 @@
 // const upload = multer({ storage });
 // module.exports = { upload };
 
+// const multer = require("multer");
+// const { CloudinaryStorage } = require("multer-storage-cloudinary");
+
+// const cloudinary = require("../config/cloudinary");
+
+// const storage = new CloudinaryStorage({
+//   cloudinary,
+//   params: async (req, file) => ({
+//     folder: "chat-app",
+
+//     resource_type: "auto",
+
+//     public_id: Date.now() + "-" + file.originalname.replace(/\s+/g, "-"),
+//   }),
+// });
+
+// const upload = multer({ storage });
+
+// module.exports = { upload };
+
 const multer = require("multer");
-const { CloudinaryStorage } = require("multer-storage-cloudinary");
+const { createClient } = require("@supabase/supabase-js");
 
-const cloudinary = require("../config/cloudinary");
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
+);
 
-const storage = new CloudinaryStorage({
-  cloudinary,
-  params: async (req, file) => ({
-    folder: "chat-app",
-
-    resource_type: "auto",
-
-    public_id: Date.now() + "-" + file.originalname.replace(/\s+/g, "-"),
-  }),
-});
-
+// store file in memory first
+const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
-module.exports = { upload };
+module.exports = { upload, supabase };
