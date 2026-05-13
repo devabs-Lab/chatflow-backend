@@ -43,12 +43,7 @@
 // module.exports = { upload };
 
 const multer = require("multer");
-const { createClient } = require("@supabase/supabase-js");
-
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-);
+const supabase = require("../config/supabase");
 
 // store file in memory first
 const storage = multer.memoryStorage();

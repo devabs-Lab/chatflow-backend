@@ -18,6 +18,7 @@ const io = new Server(server, {
     origin: [
       "http://localhost:5173",
       "https://uopeoplechatting-app.netlify.app",
+      "https://uopeoplechatting-app.vercel.app",
     ], // Add your Netlify URL
     methods: ["GET", "POST"],
   },
