@@ -1,6 +1,3 @@
--- Local Development Database Schema for UoPeople Chat (Full Extended)
--- Includes support for profile pictures, attachments, call features, reactions, threading, message status, soft delete, edits, and user presence
-
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 

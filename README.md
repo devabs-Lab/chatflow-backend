@@ -41,3 +41,14 @@ The goal is to provide a backend that can support:
 - JWT
 - Multer
 - FFmpeg utilities for media processing
+
+## Roadmap
+
+Features planned for upcoming releases:
+
+- Audio and video calling (WebRTC-based, peer-to-peer)
+- Discord-style rooms — persistent topic-based channels
+  for communities and organizations
+- Group video calls
+- Message reactions and threading
+- End-to-end encryption

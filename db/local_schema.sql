@@ -1,6 +1,3 @@
--- Local Development Database Schema for UoPeople Chat
--- This includes only essential tables for testing chat functionality
-
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
@@ -15,6 +12,10 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+
+-- This includes only essential tables for testing chat functionality
+
 
 -- Groups table
 CREATE TABLE IF NOT EXISTS groups (
