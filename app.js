@@ -9,8 +9,13 @@ const server = createServer(app);
 const port = process.env.PORT || 5500;
 
 const pool = require("./db/dbconfig.js");
+const requestLogger = require("./middleware/requestLogger");
+const createRateLimiter = require("./middleware/rateLimiter");
+
 app.use(cors());
 app.use(express.json());
+app.use(requestLogger);
+app.use(createRateLimiter({ windowMs: 15 * 60 * 1000, max: 200, keyPrefix: "global" }));
 
 // Socket.IO setup
 const io = new Server(server, {
@@ -85,6 +90,18 @@ io.on("connection", async (socket) => {
     console.log(`User ${socket.id} manually joined private chat ${roomId}`);
   });
 
+  // Join a specific channel room (Discord-style channel)
+  socket.on("join-channel", (channel_id) => {
+    socket.join(`channel-${channel_id}`);
+    console.log(`User ${socket.id} joined channel ${channel_id}`);
+  });
+
+  // Leave a specific channel room
+  socket.on("leave-channel", (channel_id) => {
+    socket.leave(`channel-${channel_id}`);
+    console.log(`User ${socket.id} left channel ${channel_id}`);
+  });
+
   // Handle new group message
   socket.on("new-group-message", (data) => {
     socket.to(`group-${data.group_id}`).emit("receive-group-message", data);
@@ -101,15 +118,19 @@ io.on("connection", async (socket) => {
     // socket.to(`private-${roomId}`).emit("receive-private-message", data);
   });
 
-  socket.on("disconnect", () => {
-    const arr = onlineUsers.get(userId) || [];
-    onlineUsers.set(
-      userId,
-      arr.filter((id) => id !== socket.id),
-    );
-    if (onlineUsers.get(userId).length === 0) onlineUsers.delete(userId);
+    // Register WebRTC calling event handlers
+    const registerCallHandlers = require("./socket/callHandler");
+    registerCallHandlers(io, socket);
+
+    socket.on("disconnect", () => {
+      const arr = onlineUsers.get(userId) || [];
+      onlineUsers.set(
+        userId,
+        arr.filter((id) => id !== socket.id),
+      );
+      if (onlineUsers.get(userId).length === 0) onlineUsers.delete(userId);
+    });
   });
-});
 
 // io is available to routes via socketState.getIO() — no need to export from app.js
 
@@ -121,6 +142,8 @@ const userroutes = require("./route/userroute");
 
 const grouproutes = require("./route/grouproutes");
 const messageroutes = require("./route/messageroutes");
+const channelroutes = require("./route/channelroutes");
+const callroutes = require("./route/callroutes");
 
 // user middleware routes
 app.use("/api/users", userroutes);
@@ -128,10 +151,21 @@ app.use("/api/users", userroutes);
 // group routes middleware
 app.use("/api/groups", grouproutes);
 
+// channel routes middleware
+app.use("/api/channels", channelroutes);
+
+// call routes middleware
+app.use("/api/calls", callroutes);
+
 app.use("/uploads", express.static("uploads"));
 
 // message routes middleware
 app.use("/api/messages", messageroutes);
+
+// global error handling middleware
+const { notFoundHandler, errorHandler } = require("./middleware/errorHandler");
+app.use(notFoundHandler);
+app.use(errorHandler);
 
 async function start() {
   try {

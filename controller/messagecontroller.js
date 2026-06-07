@@ -10,7 +10,7 @@ const {
 
 const sendGroupMessage = async (req, res) => {
   const { group_id } = req.params;
-  const { content, message_type = "text" } = req.body;
+  const { content, message_type = "text", channel_id } = req.body;
   const sender_id = req.user.userid;
   const client = await pool.connect();
   try {
@@ -24,11 +24,22 @@ const sendGroupMessage = async (req, res) => {
       return res.status(403).json({ error: "Not a member of this group" });
     }
 
+    // If channel_id is provided, verify it exists and belongs to the group
+    if (channel_id) {
+      const channelCheck = await client.query(
+        "SELECT id FROM channels WHERE id = $1 AND group_id = $2",
+        [channel_id, group_id]
+      );
+      if (channelCheck.rows.length === 0) {
+        return res.status(400).json({ error: "Channel does not belong to this group" });
+      }
+    }
+
     // Send the message
     const newMessage = await client.query(
-      `INSERT INTO messages (sender_id, group_id, content, message_type) 
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [sender_id, group_id, content, message_type],
+      `INSERT INTO messages (sender_id, group_id, channel_id, content, message_type) 
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [sender_id, group_id, channel_id || null, content, message_type],
     );
 
     // Get sender info for the response
@@ -41,6 +52,16 @@ const sendGroupMessage = async (req, res) => {
       ...newMessage.rows[0],
       sender_username: sender.rows[0].username,
     };
+
+    // Real-time broadcast via Socket.IO
+    try {
+      getIO().to(`group-${group_id}`).emit("receive-group-message", messageWithSender);
+      if (channel_id) {
+        getIO().to(`channel-${channel_id}`).emit("receive-channel-message", messageWithSender);
+      }
+    } catch (err) {
+      console.warn("Socket broadcast failed in sendGroupMessage:", err.message);
+    }
 
     res.status(201).json({
       message: "Message sent successfully",
@@ -245,103 +266,137 @@ const sendPrivatefile = async (req, res) => {
 };
 
 // Send a group file
-// const sendGroupFile = async (req, res) => {
-//   const client = await pool.connect();
+const sendGroupFile = async (req, res) => {
+  const client = await pool.connect();
 
-//   // multer gives us file + text fields
-//   const file = req.file; // single file
-//   const {
-//     sender_id,
-//     group_id,
-//     message_type,
-//     delivered_at,
-//     tempId,
-//     width,
-//     height,
-//     aspect_ratio,
-//     duration,
-//   } = req.body;
+  // multer gives us file + text fields
+  const file = req.file; // single file
+  const {
+    sender_id,
+    group_id,
+    channel_id,
+    message_type,
+    delivered_at,
+    tempId,
+    width,
+    height,
+    aspect_ratio,
+    duration,
+  } = req.body;
 
-//   if (!file) {
-//     return res.status(400).json({ error: "No file uploaded" });
-//   }
+  if (!file) {
+    return res.status(400).json({ error: "No file uploaded" });
+  }
 
-//   if (uploadCache.has(tempId)) {
-//     console.log("Duplicate prevented:", tempId);
-//     return res.json(uploadCache.get(tempId));
-//   }
+  if (uploadCache.has(tempId)) {
+    console.log("Duplicate prevented:", tempId);
+    return res.json(uploadCache.get(tempId));
+  }
 
-//   // Check if user is a member of the group
-//   const member = await client.query(
-//     "SELECT * FROM group_members WHERE group_id = $1 AND user_id = $2",
-//     [group_id, sender_id],
-//   );
+  try {
+    // Check if user is a member of the group
+    const member = await client.query(
+      "SELECT * FROM group_members WHERE group_id = $1 AND user_id = $2",
+      [group_id, sender_id],
+    );
 
-//   if (member.rows.length === 0) {
-//     return res.status(403).json({ error: "Not a member of this group" });
-//   }
+    if (member.rows.length === 0) {
+      return res.status(403).json({ error: "Not a member of this group" });
+    }
 
-//   // i create file URL (for frontend to access later)
-//   const fileurl = `/uploads/${file.filename}`;
-//   let thumbUrl = null;
+    // Verify channel belongs to group if channel_id is provided
+    if (channel_id) {
+      const channelCheck = await client.query(
+        "SELECT id FROM channels WHERE id = $1 AND group_id = $2",
+        [channel_id, group_id]
+      );
+      if (channelCheck.rows.length === 0) {
+        return res.status(400).json({ error: "Channel does not belong to this group" });
+      }
+    }
 
-//   if (!fileurl) return;
+    // Upload to Supabase Storage
+    const fileName = `${Date.now()}-${file.originalname.replace(/\s+/g, "-")}`;
+    const filePath = fileName;
 
-//   try {
-//     if (message_type === "video") {
-//       thumbUrl = await generateVideoThumbnail(file.path, file.filename);
-//     }
+    const { data, error } = await supabase.storage
+      .from("chat-files") // bucket name
+      .upload(filePath, file.buffer, {
+        contentType: file.mimetype,
+        upsert: false,
+      });
 
-//     // save to DB
-//     const result = await client.query(
-//       `INSERT INTO messages
-//        (sender_id, group_id, message_type, delivered_at, filename, filesize, fileurl, thumbUrl, width,
-//         height, aspect_ratio, duration, is_read)
-//        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,false)
-//        RETURNING *`,
-//       [
-//         sender_id,
-//         group_id,
-//         message_type,
-//         delivered_at,
-//         file.originalname,
-//         file.size,
-//         fileurl,
-//         thumbUrl,
-//         width,
-//         height,
-//         aspect_ratio,
-//         duration,
-//       ],
-//     );
+    if (error) {
+      console.error("Supabase upload error:", error);
+      return res.status(500).json({ error: "Upload failed" });
+    }
 
-//     const savedMessage = result.rows[0];
+    // Save ONLY PATH in DB
+    const fileurl = data.path;
+    let thumbUrl = null;
 
-//     // Get sender info for the response
-//     const sender = await client.query(
-//       "SELECT username FROM users WHERE userid = $1",
-//       [sender_id],
-//     );
+    if (message_type === "video") {
+      thumbUrl = fileurl.replace("/upload/", "/upload/so_1/");
+    }
 
-//     const messageWithSender = {
-//       ...savedMessage,
-//       sender_username: sender.rows[0].username,
-//     };
+    // save to DB
+    const result = await client.query(
+      `INSERT INTO messages
+       (sender_id, group_id, channel_id, message_type, delivered_at, filename, filesize, fileurl, thumbUrl, width,
+        height, aspect_ratio, duration, is_read)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,false)
+       RETURNING *`,
+      [
+        sender_id,
+        group_id,
+        channel_id || null,
+        message_type,
+        delivered_at,
+        file.originalname,
+        file.size,
+        fileurl,
+        thumbUrl,
+        width,
+        height,
+        aspect_ratio,
+        duration,
+      ],
+    );
 
-//     // SAVE IN CACHE
-//     uploadCache.set(tempId, messageWithSender);
+    const savedMessage = result.rows[0];
 
-//     // Emit to group room
-//     io.to(`group-${group_id}`).emit("receive-group-message", messageWithSender);
+    // Get sender info for the response
+    const sender = await client.query(
+      "SELECT username FROM users WHERE userid = $1",
+      [sender_id],
+    );
 
-//     res.json(messageWithSender);
-//   } catch (err) {
-//     console.error("Group file upload error:", err);
-//     res.status(500).json({ error: "File upload failed" });
-//   } finally {
-//     client.release();
-//   }
-// };
+    const messageWithSender = {
+      ...savedMessage,
+      sender_username: sender.rows[0].username,
+    };
+
+    // SAVE IN CACHE
+    uploadCache.set(tempId, messageWithSender);
+
+    // Emit to group and channel rooms
+    try {
+      getIO().to(`group-${group_id}`).emit("receive-group-message", messageWithSender);
+      if (channel_id) {
+        getIO().to(`channel-${channel_id}`).emit("receive-channel-message", messageWithSender);
+      }
+    } catch (err) {
+      console.warn("Socket broadcast failed in sendGroupFile:", err.message);
+    }
+
+    res.json(messageWithSender);
+  } catch (err) {
+    console.error("Group file upload error:", err);
+    res.status(500).json({ error: "File upload failed" });
+  } finally {
+    client.release();
+  }
+};
 
 // Get all users (for starting new chats)
 const getAllUsers = async (req, res) => {
@@ -400,7 +455,7 @@ const getUnreadMessages = async (req, res) => {
 const getGroupMessages = async (req, res) => {
   const { group_id } = req.params;
   const user_id = req.user.userid;
-  const { limit = 50, offset = 0 } = req.query;
+  const { limit = 50, offset = 0, channel_id } = req.query;
 
   const client = await pool.connect();
   try {
@@ -414,16 +469,28 @@ const getGroupMessages = async (req, res) => {
       return res.status(403).json({ error: "Not a member of this group" });
     }
 
-    // Get messages with sender info
-    const messages = await client.query(
-      `SELECT m.*, u.username as sender_username
-       FROM messages m
-       JOIN users u ON m.sender_id = u.userid
-       WHERE m.group_id = $1
-       ORDER BY m.created_at DESC
-       LIMIT $2 OFFSET $3`,
-      [group_id, parseInt(limit), parseInt(offset)],
-    );
+    // Build query based on channel_id
+    let queryText = `
+      SELECT m.*, u.username as sender_username
+      FROM messages m
+      JOIN users u ON m.sender_id = u.userid
+      WHERE m.group_id = $1
+    `;
+    const queryParams = [group_id, parseInt(limit), parseInt(offset)];
+
+    if (channel_id) {
+      queryText += ` AND m.channel_id = $4`;
+      queryParams.push(channel_id);
+    } else {
+      queryText += ` AND m.channel_id IS NULL`;
+    }
+
+    queryText += `
+      ORDER BY m.created_at DESC
+      LIMIT $2 OFFSET $3
+    `;
+
+    const messages = await client.query(queryText, queryParams);
 
     res.json(messages.rows.reverse()); // Reverse to get chronological order
   } catch (error) {
@@ -628,31 +695,56 @@ const markMessagesAsRead = async (req, res) => {
   }
 };
 
-// Get unread message count
+// Get unread message count — per-user read receipts for group/channel messages
 const getUnreadCount = async (req, res) => {
   const user_id = req.user.userid;
   const client = await pool.connect();
   try {
-    // Get unread private messages
+    // 1. Unread private messages (unchanged — uses is_read per message)
     const privateUnread = await client.query(
       "SELECT COUNT(*) FROM messages WHERE receiver_id = $1 AND is_read = false",
       [user_id],
     );
 
-    // Get unread group messages (for groups user is member of)
+    // 2. Unread group messages — compare created_at against user's last_read_at
+    //    Falls back to gm.joined_at if user has never read the group
     const groupUnread = await client.query(
       `SELECT COUNT(*) 
        FROM messages m
-       JOIN group_members gm ON m.group_id = gm.group_id
-       WHERE gm.user_id = $1 AND m.sender_id != $1 AND m.is_read = false`,
+       JOIN group_members gm ON m.group_id = gm.group_id AND gm.user_id = $1
+       LEFT JOIN group_member_last_read glr
+         ON glr.group_id = m.group_id AND glr.user_id = $1
+       WHERE m.sender_id != $1
+         AND m.group_id IS NOT NULL
+         AND m.channel_id IS NULL
+         AND m.created_at > COALESCE(glr.last_read_at, gm.joined_at)`,
+      [user_id],
+    );
+
+    // 3. Unread channel messages — compare created_at against channel last_read_at
+    const channelUnread = await client.query(
+      `SELECT COUNT(*)
+       FROM messages m
+       JOIN group_members gm ON m.group_id = gm.group_id AND gm.user_id = $1
+       LEFT JOIN channel_member_last_read clr
+         ON clr.channel_id = m.channel_id AND clr.user_id = $1
+       WHERE m.sender_id != $1
+         AND m.channel_id IS NOT NULL
+         AND m.created_at > COALESCE(clr.last_read_at, gm.joined_at)`,
       [user_id],
     );
 
     const totalUnread =
       parseInt(privateUnread.rows[0].count) +
-      parseInt(groupUnread.rows[0].count);
+      parseInt(groupUnread.rows[0].count) +
+      parseInt(channelUnread.rows[0].count);
 
-    res.json({ unread_count: totalUnread });
+    res.json({
+      unread_count: totalUnread,
+      private_unread: parseInt(privateUnread.rows[0].count),
+      group_unread: parseInt(groupUnread.rows[0].count),
+      channel_unread: parseInt(channelUnread.rows[0].count),
+    });
   } catch (error) {
     console.error("Error getting unread count:", error);
     res.status(500).json({ error: "Internal server error" });
@@ -661,8 +753,114 @@ const getUnreadCount = async (req, res) => {
   }
 };
 
+// Mark a group's messages as read for the current user (upsert last_read_at)
+const markGroupAsRead = async (req, res) => {
+  const { group_id } = req.params;
+  const user_id = req.user.userid;
+  const client = await pool.connect();
+  try {
+    // Verify user is a member of this group
+    const member = await client.query(
+      "SELECT * FROM group_members WHERE group_id = $1 AND user_id = $2",
+      [group_id, user_id],
+    );
+    if (member.rows.length === 0) {
+      return res.status(403).json({ error: "Not a member of this group" });
+    }
+
+    // Upsert the last-read timestamp for this user in this group
+    await client.query(
+      `INSERT INTO group_member_last_read (group_id, user_id, last_read_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (group_id, user_id) DO UPDATE SET last_read_at = NOW()`,
+      [group_id, user_id],
+    );
+
+    // Notify all online group members about this user's read
+    try {
+      const membersResult = await client.query(
+        "SELECT user_id FROM group_members WHERE group_id = $1 AND user_id != $2",
+        [group_id, user_id],
+      );
+      membersResult.rows.forEach((row) => {
+        const sockets = onlineUsers.get(row.user_id) || [];
+        sockets.forEach((sId) =>
+          getIO().to(sId).emit("group-read-receipt", { group_id, reader_id: user_id }),
+        );
+      });
+    } catch (err) {
+      console.warn("Socket emit failed for group-read-receipt:", err.message);
+    }
+
+    res.json({ success: true, group_id });
+  } catch (err) {
+    console.error("Error marking group as read:", err);
+    res.status(500).json({ error: "Server error" });
+  } finally {
+    client.release();
+  }
+};
+
+// Mark a channel's messages as read for the current user (upsert last_read_at)
+const markChannelAsRead = async (req, res) => {
+  const { channel_id } = req.params;
+  const user_id = req.user.userid;
+  const client = await pool.connect();
+  try {
+    // Verify channel exists and user is a member of its parent group
+    const channelResult = await client.query(
+      "SELECT group_id FROM channels WHERE id = $1",
+      [channel_id],
+    );
+    if (channelResult.rows.length === 0) {
+      return res.status(404).json({ error: "Channel not found" });
+    }
+
+    const group_id = channelResult.rows[0].group_id;
+    const member = await client.query(
+      "SELECT * FROM group_members WHERE group_id = $1 AND user_id = $2",
+      [group_id, user_id],
+    );
+    if (member.rows.length === 0) {
+      return res.status(403).json({ error: "Not a member of this group" });
+    }
+
+    // Upsert the last-read timestamp for this user in this channel
+    await client.query(
+      `INSERT INTO channel_member_last_read (channel_id, user_id, last_read_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (channel_id, user_id) DO UPDATE SET last_read_at = NOW()`,
+      [channel_id, user_id],
+    );
+
+    // Notify other online group members about this user's read
+    try {
+      const membersResult = await client.query(
+        "SELECT user_id FROM group_members WHERE group_id = $1 AND user_id != $2",
+        [group_id, user_id],
+      );
+      membersResult.rows.forEach((row) => {
+        const sockets = onlineUsers.get(row.user_id) || [];
+        sockets.forEach((sId) =>
+          getIO().to(sId).emit("channel-read-receipt", { channel_id, reader_id: user_id }),
+        );
+      });
+    } catch (err) {
+      console.warn("Socket emit failed for channel-read-receipt:", err.message);
+    }
+
+    res.json({ success: true, channel_id });
+  } catch (err) {
+    console.error("Error marking channel as read:", err);
+    res.status(500).json({ error: "Server error" });
+  } finally {
+    client.release();
+  }
+};
+
 module.exports = {
   sendGroupMessage,
+  sendGroupFile,
   sendPrivateMessage,
   sendPrivatefile,
   getGroupMessages,
@@ -670,6 +868,8 @@ module.exports = {
   getUserConversations,
   getUnreadMessages,
   markMessagesAsRead,
+  markGroupAsRead,
+  markChannelAsRead,
   getUnreadCount,
   getAllUsers,
   syncmarking,

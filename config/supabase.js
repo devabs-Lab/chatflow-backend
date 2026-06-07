@@ -1,4 +1,5 @@
 const { createClient } = require("@supabase/supabase-js");
+const WebSocket = require("ws");
 
 const requiredEnv = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"];
 const missingEnv = requiredEnv.filter((key) => !process.env[key]);
@@ -12,6 +13,11 @@ if (missingEnv.length) {
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY,
+  {
+    realtime: {
+      transport: WebSocket,
+    },
+  },
 );
 
 module.exports = supabase;

@@ -13,11 +13,13 @@ const {
   uploadAvatar,
 } = require("../controller/usercontroller");
 
-router.post("/register", register);
+const { validateRegister, validateLogin } = require("../middleware/validationSchemas");
+
+router.post("/register", validateRegister, register);
 
 // login user
 
-router.post("/login", login);
+router.post("/login", validateLogin, login);
 
 // username provider
 

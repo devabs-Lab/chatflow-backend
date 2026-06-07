@@ -7,12 +7,20 @@ async function setupDatabase() {
   try {
     console.log("Setting up database schema for chat functionality...");
 
-    // Read the SQL schema file
+    // Read the SQL schema files
     const schemaPath = path.join(__dirname, "db", "chat_schema.sql");
     const schemaSQL = fs.readFileSync(schemaPath, "utf8");
 
+    const channelsSchemaPath = path.join(__dirname, "db", "channels_schema.sql");
+    const channelsSchemaSQL = fs.readFileSync(channelsSchemaPath, "utf8");
+
+    const readReceiptsSchemaPath = path.join(__dirname, "db", "read_receipts_schema.sql");
+    const readReceiptsSchemaSQL = fs.readFileSync(readReceiptsSchemaPath, "utf8");
+
+    const combinedSQL = schemaSQL + "\n" + channelsSchemaSQL + "\n" + readReceiptsSchemaSQL;
+
     // Split the SQL into individual statements
-    const statements = schemaSQL
+    const statements = combinedSQL
       .split(";")
       .map((stmt) => stmt.trim())
       .filter((stmt) => stmt.length > 0 && !stmt.startsWith("--"));
@@ -25,10 +33,10 @@ async function setupDatabase() {
           await pool.query(statement);
           console.log(`✓ Executed statement ${i + 1}/${statements.length}`);
         } catch (error) {
-          if (error.code === "42P07") {
-            // Table already exists, this is fine
+          if (error.code === "42P07" || error.message.includes("already exists")) {
+            // Table/column/index already exists, this is fine
             console.log(
-              `⚠ Statement ${i + 1}/${statements.length} - Table already exists`
+              `危害 Statement ${i + 1}/${statements.length} - Already exists`
             );
           } else {
             console.error(

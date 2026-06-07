@@ -31,14 +31,22 @@ async function setupDatabase() {
     const client = await pool.connect();
     console.log("✅ Database connection successful");
 
-    // Read and execute the schema file
-    const schemaPath = path.join(__dirname, "db", "local_schema.sql");
+    // Read and execute the schema files
+    const schemaPath = path.join(__dirname, "db", "chat_schema.sql");
     const schemaSQL = fs.readFileSync(schemaPath, "utf8");
+
+    const channelsSchemaPath = path.join(__dirname, "db", "channels_schema.sql");
+    const channelsSchemaSQL = fs.readFileSync(channelsSchemaPath, "utf8");
+
+    const readReceiptsSchemaPath = path.join(__dirname, "db", "read_receipts_schema.sql");
+    const readReceiptsSchemaSQL = fs.readFileSync(readReceiptsSchemaPath, "utf8");
+
+    const combinedSQL = schemaSQL + "\n" + channelsSchemaSQL + "\n" + readReceiptsSchemaSQL;
 
     console.log("📋 Creating database tables...");
 
     // Split SQL into individual statements and execute
-    const statements = schemaSQL
+    const statements = combinedSQL
       .split(";")
       .map((statement) => statement.trim())
       .filter((statement) => statement.length > 0);
@@ -49,7 +57,7 @@ async function setupDatabase() {
           await client.query(statement);
         } catch (error) {
           // Ignore "already exists" errors
-          if (!error.message.includes("already exists")) {
+          if (!error.message.includes("already exists") && error.code !== "42P07") {
             console.warn(`⚠️  Warning: ${error.message}`);
           }
         }

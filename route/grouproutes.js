@@ -14,8 +14,10 @@ const {
 // All routes require authentication
 router.use(authmiddleware);
 
+const { validateCreateGroup } = require("../middleware/validationSchemas");
+
 // Create a new group
-router.post("/", createGroup);
+router.post("/", validateCreateGroup, createGroup);
 
 // Get all public groups
 router.get("/public", getPublicGroups);

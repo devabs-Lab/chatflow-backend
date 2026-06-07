@@ -200,7 +200,7 @@ const leaveGroup = async (req, res) => {
 // Get group details
 const getGroupDetails = async (req, res) => {
   const { group_id } = req.params;
-  const user_id = req.user.id;
+  const user_id = req.user.userid;
 
   const client = await pool.connect();
   try {
@@ -221,7 +221,7 @@ const getGroupDetails = async (req, res) => {
               u.username as creator_name
        FROM groups g
        LEFT JOIN group_members gm ON g.id = gm.group_id
-       LEFT JOIN users u ON g.created_by = u.id
+       LEFT JOIN users u ON g.created_by = u.userid
        WHERE g.id = $1
        GROUP BY g.id, u.username`,
       [group_id]

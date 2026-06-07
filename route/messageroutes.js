@@ -5,6 +5,7 @@ const verifyStreamToken = require("../middleware/streamAuth");
 const { upload } = require("../storage/Storageconfig");
 const {
   sendGroupMessage,
+  sendGroupFile,
   sendPrivateMessage,
   sendPrivatefile,
   getGroupMessages,
@@ -12,6 +13,8 @@ const {
   getUserConversations,
   getUnreadMessages,
   markMessagesAsRead,
+  markGroupAsRead,
+  markChannelAsRead,
   getUnreadCount,
   getAllUsers,
   syncmarking,
@@ -23,6 +26,7 @@ const { streamOrDownloadFile } = require("../controller/fileController");
 router.use(authmiddleware);
 
 // Group messages
+router.post("/file/group", upload.single("file"), sendGroupFile);
 router.post("/group/:group_id", sendGroupMessage);
 router.get("/group/:group_id", getGroupMessages);
 
@@ -41,7 +45,8 @@ router.get("/unread", getUnreadMessages);
 router.get("/syncread/:otheruserid", syncmarking);
 
 // Mark messages as read
-router.put("/read/group/:group_id", markMessagesAsRead);
+router.put("/read/group/:group_id", markGroupAsRead);
+router.put("/read/channel/:channel_id", markChannelAsRead);
 router.put("/read/private/:message_id", markMessagesAsRead);
 
 module.exports = router;
