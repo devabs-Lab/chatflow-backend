@@ -42,32 +42,6 @@ The goal is to provide a backend that can support:
 - Multer
 - FFmpeg utilities for media processing
 
-## Docker
-
-Build the backend image from this folder:
-
-```bash
-docker build -t chatflow-backend .
-```
-
-Run it with an env file:
-
-```bash
-docker run --rm -p 5500:5500 --env-file .env chatflow-backend
-```
-
-Required environment variables are shown in `.env.example`.
-
-For a hosted Postgres database such as Supabase, keep the default SSL behavior.
-For a local Postgres database that does not support SSL, set:
-
-```bash
-DATABASE_SSL=false
-```
-
-If Postgres is running directly on your Windows host and the backend is running
-inside Docker, use `host.docker.internal` in `DATABASE_URL`.
-
 ## Roadmap
 
 Features planned for upcoming releases:
