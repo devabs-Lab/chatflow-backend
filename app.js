@@ -3,10 +3,10 @@ const express = require("express");
 const cors = require("cors");
 const { createServer } = require("http");
 const { Server } = require("socket.io");
+const { setIO, onlineUsers } = require("./socket/socketState");
 const app = express();
 const server = createServer(app);
 const port = process.env.PORT || 5500;
-require("dotenv").config();
 
 const pool = require("./db/dbconfig.js");
 app.use(cors());
@@ -15,14 +15,13 @@ app.use(express.json());
 // Socket.IO setup
 const io = new Server(server, {
   cors: {
-    origin: [
-      "http://localhost:5173",
-      "https://uopeoplechatting-app.netlify.app",
-      "https://uopeoplechatting-app.vercel.app",
-    ], // Add your Netlify URL
+    origin: ["http://localhost:5174"], // Add your Netlify URL
     methods: ["GET", "POST"],
   },
 });
+
+// Register io in shared state so controllers can access it without importing app.js
+setIO(io);
 
 // Socket.IO connection handling
 const getAllUserChats = async (userId) => {
@@ -45,7 +44,7 @@ const getAllUserChats = async (userId) => {
   }
 };
 
-const onlineUsers = new Map();
+// onlineUsers is imported from socketState — same Map instance used by controllers
 io.on("connection", async (socket) => {
   const userId = socket.handshake.query.userId;
 
@@ -112,9 +111,7 @@ io.on("connection", async (socket) => {
   });
 });
 
-// Make io available to routes
-app.set("io", io);
-module.exports = { io, onlineUsers };
+// io is available to routes via socketState.getIO() — no need to export from app.js
 
 // authentication middleware
 const authmiddleware = require("./middleware/authmiddleware");
@@ -141,14 +138,17 @@ async function start() {
     const result = await pool.query(
       "SELECT 'test connection to pg' As message",
     );
-    console.log("PostgreSQL DB Connection Successful:", result.rows[0].message); // Just to confirm DB is connected
-
-    server.listen(port, "0.0.0.0", () => {
-      console.log(`Server is listening on port ${port}`);
-    });
+    console.log("PostgreSQL DB Connection Successful:", result.rows[0].message);
   } catch (error) {
-    console.error("Failed to connect to DB:", error);
+    console.warn(
+      "Warning: DB connection failed, continuing anyway:",
+      error.message,
+    );
   }
+
+  server.listen(port, "0.0.0.0", () => {
+    console.log(`Server is listening on port ${port}`);
+  });
 }
 
 start();

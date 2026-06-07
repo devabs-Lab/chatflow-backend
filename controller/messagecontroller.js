@@ -1,6 +1,6 @@
 const pool = require("../db/dbconfig");
 const { v4: uuidv4 } = require("uuid");
-const { io, onlineUsers } = require("../app.js");
+const { getIO, onlineUsers } = require("../socket/socketState");
 const {
   addSignedAvatarUrls,
   createSignedStorageUrl,
@@ -110,7 +110,7 @@ const sendPrivateMessage = async (req, res) => {
     const receiverSockets = onlineUsers.get(receiver_id) || [];
 
     receiverSockets.forEach((sId) =>
-      io.to(sId).emit("receive-private-message", messageWithSender),
+      getIO().to(sId).emit("receive-private-message", messageWithSender),
     );
 
     res.status(201).json({
@@ -226,7 +226,7 @@ const sendPrivatefile = async (req, res) => {
     const receiverSockets = onlineUsers.get(receiver_id) || [];
 
     receiverSockets.forEach((sId) =>
-      io.to(sId).emit("receive-private-message", savedMessage),
+      getIO().to(sId).emit("receive-private-message", savedMessage),
     );
 
     // Optional cleanup after 1 hour
@@ -573,7 +573,6 @@ const markMessagesAsRead = async (req, res) => {
   const { message_id } = req.params; // <-- only message id
   const user_id = req.user.userid;
   const client = await pool.connect();
-  const { io, onlineUsers } = require("../app.js");
   console.log(message_id, "and", user_id);
 
   try {
@@ -607,7 +606,7 @@ const markMessagesAsRead = async (req, res) => {
       console.log("why is this happening");
       const senderSockets = onlineUsers.get(updatedRows[0].sender_id) || [];
       senderSockets.forEach((sId) =>
-        io.to(sId).emit("message-read", {
+        getIO().to(sId).emit("message-read", {
           messageId: message_id,
           receiver_id: updatedRows[0].receiver_id,
         }),

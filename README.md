@@ -1,17 +1,43 @@
-# uopeople-chatapp-backend-using-postgresql
+# Chatflow Backend
 
-<!-- Next steps (optional, but powerful)
+Chatflow Backend is a real-time chat backend built with Node.js,
+Express, Socket.IO, PostgreSQL, and Supabase Storage.
 
-If you want, I can next:
+It supports private messaging, group messaging, media uploads, read
+receipts, online presence tracking, and JWT-based authentication.
 
-Add background thumbnail generation (non-blocking)
+## Why I Built This
 
-Add video duration check on backend
+I built Chatflow Backend as a customizable communication backend for
+institutions such as schools, businesses, and organizations that need
+their own messaging system.
 
-Add silent autoplay previews
+The goal is to provide a backend that can support:
 
-Optimize large video uploads
+- Internal communication between staff or employees
+- Student-to-student and student-to-teacher messaging
+- Customer or member support chat
+- Private and group conversations with media sharing
 
-Make streaming start instantly
+## Features
 
-Just tell me which one you want next 🔥 -->
+- Real-time private and group messaging with Socket.IO
+- Image, video, audio, and file message support
+- JWT-based authentication middleware
+- PostgreSQL database with connection pooling
+- Supabase Storage integration for uploaded media
+- Signed file download URLs
+- Read receipts
+- Online user tracking
+- REST API built with Express.js
+
+## Tech Stack
+
+- Node.js
+- Express.js
+- Socket.IO
+- PostgreSQL with `pg`
+- Supabase Storage
+- JWT
+- Multer
+- FFmpeg utilities for media processing
