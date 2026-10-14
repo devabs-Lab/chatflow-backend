@@ -6,11 +6,62 @@ const {
   createSignedStorageUrl,
 } = require("../utils/storageUrls");
 // const { generateVideoThumbnail } = require("../utils/videoThumb");
+
+/* The quoted message a reply points at, flattened onto the reply itself so
+   the bubble can render the quote without a second request. Kept to the few
+   fields a quote actually shows. */
+const loadParentPreview = async (client, parentId) => {
+  if (!parentId) return {};
+  const { rows } = await client.query(
+    `SELECT m.content, m.message_type, m.filename, m.is_deleted, u.username
+     FROM messages m LEFT JOIN users u ON u.userid = m.sender_id
+     WHERE m.id = $1`,
+    [parentId],
+  );
+  if (rows.length === 0) return {};
+  return {
+    parent_content: rows[0].content,
+    parent_message_type: rows[0].message_type,
+    parent_filename: rows[0].filename,
+    parent_is_deleted: rows[0].is_deleted,
+    parent_sender_username: rows[0].username,
+  };
+};
+
+/* Attach reactions to a page of messages in one query rather than one per
+   message. Returns [{emoji, count, user_ids}] per message id so the client
+   can render the pills and tell whether *you* are in each one. */
+const attachReactions = async (client, rows) => {
+  if (rows.length === 0) return rows;
+
+  const { rows: reactionRows } = await client.query(
+    `SELECT message_id, emoji, COUNT(*)::int AS count,
+            ARRAY_AGG(user_id) AS user_ids
+     FROM message_reactions
+     WHERE message_id = ANY($1)
+     GROUP BY message_id, emoji
+     ORDER BY MIN(created_at)`,
+    [rows.map((r) => r.id)],
+  );
+
+  const byMessage = new Map();
+  reactionRows.forEach((r) => {
+    if (!byMessage.has(r.message_id)) byMessage.set(r.message_id, []);
+    byMessage.get(r.message_id).push({
+      emoji: r.emoji,
+      count: r.count,
+      user_ids: r.user_ids,
+    });
+  });
+
+  return rows.map((r) => ({ ...r, reactions: byMessage.get(r.id) || [] }));
+};
+
 // Send a message to a group
 
 const sendGroupMessage = async (req, res) => {
   const { group_id } = req.params;
-  const { content, message_type = "text", channel_id } = req.body;
+  const { content, message_type = "text", channel_id, parent_message_id } = req.body;
   const sender_id = req.user.userid;
   const client = await pool.connect();
   try {
@@ -35,22 +86,39 @@ const sendGroupMessage = async (req, res) => {
       }
     }
 
+    /* A reply must point at a message in this same group — otherwise a
+       crafted parent_message_id could quote a message from a conversation
+       the sender can't see, and the quote would render it to everyone. */
+    let parentId = null;
+    if (parent_message_id) {
+      const parent = await client.query(
+        "SELECT id FROM messages WHERE id = $1 AND group_id = $2",
+        [parent_message_id, group_id],
+      );
+      if (parent.rows.length === 0) {
+        return res.status(400).json({ error: "Can only reply to a message in this group" });
+      }
+      parentId = parent_message_id;
+    }
+
     // Send the message
     const newMessage = await client.query(
-      `INSERT INTO messages (sender_id, group_id, channel_id, content, message_type) 
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [sender_id, group_id, channel_id || null, content, message_type],
+      `INSERT INTO messages (sender_id, group_id, channel_id, content, message_type, parent_message_id)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [sender_id, group_id, channel_id || null, content, message_type, parentId],
     );
 
     // Get sender info for the response
     const sender = await client.query(
-      "SELECT username FROM users WHERE userid = $1",
+      "SELECT username, avatar_url FROM users WHERE userid = $1",
       [sender_id],
     );
 
     const messageWithSender = {
       ...newMessage.rows[0],
       sender_username: sender.rows[0].username,
+      sender_avatar_url: await createSignedStorageUrl(sender.rows[0].avatar_url),
+      ...(await loadParentPreview(client, parentId)),
     };
 
     // Real-time broadcast via Socket.IO
@@ -84,8 +152,13 @@ const sendPrivateMessage = async (req, res) => {
 
   let deliveredAtDate = new Date(delivered_at).getTime();
 
+  // Fall back to now when delivered_at is missing or unparseable — without
+  // this, Number.isNaN slips past the check below and toISOString() throws.
   // If more than 5 minutes difference from now, override with now
-  if (Math.abs(Date.now() - deliveredAtDate) > 5 * 60 * 1000) {
+  if (
+    Number.isNaN(deliveredAtDate) ||
+    Math.abs(Date.now() - deliveredAtDate) > 5 * 60 * 1000
+  ) {
     deliveredAtDate = Date.now();
   }
 
@@ -117,7 +190,7 @@ const sendPrivateMessage = async (req, res) => {
 
     // Get sender info for the responserrs
     const sender = await client.query(
-      "SELECT username FROM users WHERE userid = $1",
+      "SELECT username, avatar_url FROM users WHERE userid = $1",
       [sender_id],
     );
 
@@ -126,6 +199,7 @@ const sendPrivateMessage = async (req, res) => {
     const messageWithSender = {
       ...newMessage.rows[0],
       sender_username: sender.rows[0].username,
+      sender_avatar_url: await createSignedStorageUrl(sender.rows[0].avatar_url),
     };
 
     const receiverSockets = onlineUsers.get(receiver_id) || [];
@@ -239,7 +313,15 @@ const sendPrivatefile = async (req, res) => {
     );
     // console.log(result.rows[0]);
     // return saved message
-    const savedMessage = result.rows[0];
+    const sender = await client.query(
+      "SELECT username, avatar_url FROM users WHERE userid = $1",
+      [sender_id],
+    );
+    const savedMessage = {
+      ...result.rows[0],
+      sender_username: sender.rows[0]?.username,
+      sender_avatar_url: await createSignedStorageUrl(sender.rows[0]?.avatar_url),
+    };
 
     // SAVE IN CACHE
     uploadCache.set(tempId, savedMessage);
@@ -367,13 +449,14 @@ const sendGroupFile = async (req, res) => {
 
     // Get sender info for the response
     const sender = await client.query(
-      "SELECT username FROM users WHERE userid = $1",
+      "SELECT username, avatar_url FROM users WHERE userid = $1",
       [sender_id],
     );
 
     const messageWithSender = {
       ...savedMessage,
       sender_username: sender.rows[0].username,
+      sender_avatar_url: await createSignedStorageUrl(sender.rows[0].avatar_url),
     };
 
     // SAVE IN CACHE
@@ -425,7 +508,7 @@ const getUnreadMessages = async (req, res) => {
   const userId = req.user.userid;
   try {
     const messages = await pool.query(
-      `SELECT m.*, u.username AS sender_username
+      `SELECT m.*, u.username AS sender_username, u.avatar_url AS sender_avatar_url
          FROM messages m
          JOIN users u ON m.sender_id = u.userid
          WHERE m.receiver_id = $1
@@ -437,7 +520,7 @@ const getUnreadMessages = async (req, res) => {
     const rows = await Promise.all(
       messages.rows.map(async (message) => ({
         ...message,
-        sender_avatar: await createSignedStorageUrl(message.sender_avatar),
+        sender_avatar_url: await createSignedStorageUrl(message.sender_avatar_url),
       })),
     );
 
@@ -471,9 +554,16 @@ const getGroupMessages = async (req, res) => {
 
     // Build query based on channel_id
     let queryText = `
-      SELECT m.*, u.username as sender_username
+      SELECT m.*, u.username as sender_username, u.avatar_url as sender_avatar_url,
+             pm.content     AS parent_content,
+             pm.message_type AS parent_message_type,
+             pm.filename    AS parent_filename,
+             pm.is_deleted  AS parent_is_deleted,
+             pu.username    AS parent_sender_username
       FROM messages m
       JOIN users u ON m.sender_id = u.userid
+      LEFT JOIN messages pm ON pm.id = m.parent_message_id
+      LEFT JOIN users pu ON pu.userid = pm.sender_id
       WHERE m.group_id = $1
     `;
     const queryParams = [group_id, parseInt(limit), parseInt(offset)];
@@ -491,8 +581,30 @@ const getGroupMessages = async (req, res) => {
     `;
 
     const messages = await client.query(queryText, queryParams);
+    const rows = messages.rows.reverse(); // chronological order
 
-    res.json(messages.rows.reverse()); // Reverse to get chronological order
+    /* Sign each unique avatar path once rather than once per row — a group
+       page can repeat the same few senders many times. */
+    const uniquePaths = [
+      ...new Set(rows.map((r) => r.sender_avatar_url).filter(Boolean)),
+    ];
+    const signedByPath = new Map(
+      await Promise.all(
+        uniquePaths.map(async (p) => [p, await createSignedStorageUrl(p)]),
+      ),
+    );
+
+    res.json(
+      await attachReactions(
+        client,
+        rows.map((r) => ({
+          ...r,
+          sender_avatar_url: r.sender_avatar_url
+            ? signedByPath.get(r.sender_avatar_url)
+            : null,
+        })),
+      ),
+    );
   } catch (error) {
     console.error("Error fetching group messages:", error);
     res.status(500).json({ error: "Internal server error" });
@@ -526,7 +638,7 @@ const getPrivateMessages = async (req, res) => {
         SELECT
           m.*,
           u.username AS sender_username,
-          u.avatar_url AS sender_avatar,
+          u.avatar_url AS sender_avatar_url,
           ROW_NUMBER() OVER (
             ORDER BY COALESCE(m.delivered_at, m.created_at) ASC
           ) AS rn,
@@ -544,8 +656,27 @@ const getPrivateMessages = async (req, res) => {
       `,
       [user_id, other_user_id, parseInt(limit), parseInt(offset)],
     );
-    // console.log(messages.rows);
-    res.json(messages.rows);
+
+    /* u.avatar_url is a raw Supabase storage path, not a usable URL — every
+       row needs it signed before it reaches the client. Only one or two
+       distinct senders ever show up in a 1:1 page, so sign each unique
+       path once rather than once per row. */
+    const uniquePaths = [
+      ...new Set(messages.rows.map((r) => r.sender_avatar_url).filter(Boolean)),
+    ];
+    const signedByPath = new Map(
+      await Promise.all(
+        uniquePaths.map(async (p) => [p, await createSignedStorageUrl(p)]),
+      ),
+    );
+    const rowsWithSignedAvatars = messages.rows.map((r) => ({
+      ...r,
+      sender_avatar_url: r.sender_avatar_url
+        ? signedByPath.get(r.sender_avatar_url)
+        : null,
+    }));
+
+    res.json(await attachReactions(client, rowsWithSignedAvatars));
     // Reverse to get chronological order
   } catch (error) {
     console.error("Error fetching private messages:", error);
@@ -560,26 +691,44 @@ const getUserConversations = async (req, res) => {
   const user_id = req.user.userid;
   const client = await pool.connect();
   try {
-    // Get all conversations (both sent and received)
+    // Get all conversations (both sent and received), each with the most
+    // recent message so the inbox can show a real preview line.
     const conversations = await client.query(
-      `SELECT DISTINCT 
-              CASE 
-                WHEN m.sender_id = $1 THEN m.receiver_id
-                ELSE m.sender_id
-              END as other_user_id,
-              u.username as other_username,
-              MAX(m.created_at) as last_message_time,
-              COUNT(*) as message_count
-       FROM messages m
-       JOIN users u ON (
-         CASE 
-           WHEN m.sender_id = $1 THEN m.receiver_id
-           ELSE m.sender_id
-         END = u.userid
+      `WITH conv AS (
+         SELECT m.*,
+                CASE
+                  WHEN m.sender_id = $1 THEN m.receiver_id
+                  ELSE m.sender_id
+                END AS partner_id,
+                COALESCE(m.delivered_at, m.created_at) AS sort_time
+         FROM messages m
+         WHERE (m.sender_id = $1 OR m.receiver_id = $1)
+           AND m.receiver_id IS NOT NULL
+           AND m.group_id IS NULL
+       ),
+       latest AS (
+         SELECT DISTINCT ON (partner_id)
+                partner_id, content, message_type, filename, sender_id, sort_time
+         FROM conv
+         ORDER BY partner_id, sort_time DESC
+       ),
+       totals AS (
+         SELECT partner_id, COUNT(*)::int AS message_count
+         FROM conv
+         GROUP BY partner_id
        )
-       WHERE m.receiver_id = $1 OR m.sender_id = $1
-       GROUP BY other_user_id, u.username
-       ORDER BY last_message_time DESC`,
+       SELECT l.partner_id           AS other_user_id,
+              u.username             AS other_username,
+              l.content              AS last_message,
+              l.message_type         AS last_message_type,
+              l.filename             AS last_message_filename,
+              l.sender_id            AS last_message_sender_id,
+              l.sort_time            AS last_message_time,
+              t.message_count
+       FROM latest l
+       JOIN users u  ON u.userid = l.partner_id
+       JOIN totals t ON t.partner_id = l.partner_id
+       ORDER BY l.sort_time DESC`,
       [user_id],
     );
 
@@ -858,6 +1007,224 @@ const markChannelAsRead = async (req, res) => {
   }
 };
 
+/* -------------------------------------------------- edit / delete / react */
+
+/* Who may act on a message, in one place so edit, delete and the socket
+   broadcasts all agree.
+
+   - Editing is always and only the author's own business.
+   - Deleting: your own message, always. Someone else's, only in a group,
+     and only if you're the owner or an admin the owner has granted
+     can_delete_messages — being an admin is not by itself enough, which is
+     the rule the user specified. */
+const loadMessageForModeration = async (client, messageId, userId) => {
+  const { rows } = await client.query(
+    `SELECT id, sender_id, group_id, receiver_id, message_type, is_deleted
+     FROM messages WHERE id = $1`,
+    [messageId]
+  );
+  if (rows.length === 0) return { error: "Message not found", status: 404 };
+
+  const message = rows[0];
+  const isAuthor = message.sender_id === userId;
+
+  let canModerate = false;
+  if (message.group_id) {
+    const { rows: perms } = await client.query(
+      `SELECT gm.role, gm.can_delete_messages, g.created_by
+       FROM group_members gm
+       JOIN groups g ON g.id = gm.group_id
+       WHERE gm.group_id = $1 AND gm.user_id = $2`,
+      [message.group_id, userId]
+    );
+    if (perms.length === 0) {
+      return { error: "Not a member of this group", status: 403 };
+    }
+    canModerate =
+      perms[0].created_by === userId ||
+      (perms[0].role === "admin" && perms[0].can_delete_messages === true);
+  }
+
+  return { message, isAuthor, canModerate };
+};
+
+/* Broadcast a change to whoever can see the message — the group room for a
+   group message, both participants' sockets for a direct one. */
+const broadcastMessageChange = (event, message, payload) => {
+  try {
+    if (message.group_id) {
+      getIO().to(`group-${message.group_id}`).emit(event, payload);
+    } else {
+      [message.sender_id, message.receiver_id].forEach((uid) => {
+        (onlineUsers.get(uid) || []).forEach((sId) =>
+          getIO().to(sId).emit(event, payload)
+        );
+      });
+    }
+  } catch (err) {
+    console.warn(`Socket emit failed for ${event}:`, err.message);
+  }
+};
+
+const editMessage = async (req, res) => {
+  const { message_id } = req.params;
+  const { content } = req.body;
+  const userId = req.user.userid;
+
+  if (!content || !String(content).trim()) {
+    return res.status(400).json({ error: "A message can't be empty" });
+  }
+
+  const client = await pool.connect();
+  try {
+    const { message, isAuthor, error, status } = await loadMessageForModeration(
+      client,
+      message_id,
+      userId
+    );
+    if (error) return res.status(status).json({ error });
+    if (message.is_deleted) {
+      return res.status(400).json({ error: "This message was deleted" });
+    }
+    /* Deliberately not extended to admins: editing someone else's words
+       and leaving their name on them is a different thing entirely from
+       removing them. */
+    if (!isAuthor) {
+      return res.status(403).json({ error: "You can only edit your own messages" });
+    }
+    if (message.message_type !== "text") {
+      return res.status(400).json({ error: "Only text messages can be edited" });
+    }
+
+    const { rows } = await client.query(
+      `UPDATE messages SET content = $1, edited_at = NOW()
+       WHERE id = $2 RETURNING id, content, edited_at, group_id, sender_id, receiver_id`,
+      [String(content).trim(), message_id]
+    );
+
+    broadcastMessageChange("message-edited", message, {
+      id: rows[0].id,
+      content: rows[0].content,
+      edited_at: rows[0].edited_at,
+      group_id: rows[0].group_id,
+    });
+
+    res.json({ message: "Message updated", data: rows[0] });
+  } catch (error) {
+    console.error("Error editing message:", error);
+    res.status(500).json({ error: "Internal server error" });
+  } finally {
+    client.release();
+  }
+};
+
+const deleteMessage = async (req, res) => {
+  const { message_id } = req.params;
+  const userId = req.user.userid;
+
+  const client = await pool.connect();
+  try {
+    const { message, isAuthor, canModerate, error, status } =
+      await loadMessageForModeration(client, message_id, userId);
+    if (error) return res.status(status).json({ error });
+    if (message.is_deleted) return res.json({ message: "Already deleted" });
+
+    if (!isAuthor && !canModerate) {
+      return res.status(403).json({
+        error: "You can only delete your own messages",
+      });
+    }
+
+    /* Soft delete: the row stays so the conversation keeps its shape and
+       "This message was deleted" can render in place, which is also what
+       makes an accidental delete recoverable at the database level. */
+    await client.query(
+      `UPDATE messages SET is_deleted = TRUE, content = NULL WHERE id = $1`,
+      [message_id]
+    );
+
+    // A pinned message that's been deleted shouldn't stay pinned.
+    if (message.group_id) {
+      await client.query(
+        "UPDATE groups SET pinned_message_id = NULL WHERE pinned_message_id = $1",
+        [message_id]
+      );
+    }
+
+    broadcastMessageChange("message-deleted", message, {
+      id: message_id,
+      group_id: message.group_id,
+      deleted_by: userId,
+    });
+
+    res.json({ message: "Message deleted" });
+  } catch (error) {
+    console.error("Error deleting message:", error);
+    res.status(500).json({ error: "Internal server error" });
+  } finally {
+    client.release();
+  }
+};
+
+/* One reaction per emoji per person per message: reacting with an emoji
+   you've already used removes it, which is how every chat app behaves. */
+const toggleReaction = async (req, res) => {
+  const { message_id } = req.params;
+  const { emoji } = req.body;
+  const userId = req.user.userid;
+
+  if (!emoji || String(emoji).length > 16) {
+    return res.status(400).json({ error: "An emoji is required" });
+  }
+
+  const client = await pool.connect();
+  try {
+    const { message, error, status } = await loadMessageForModeration(
+      client,
+      message_id,
+      userId
+    );
+    if (error) return res.status(status).json({ error });
+
+    const existing = await client.query(
+      "SELECT id FROM message_reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3",
+      [message_id, userId, emoji]
+    );
+
+    if (existing.rows.length > 0) {
+      await client.query("DELETE FROM message_reactions WHERE id = $1", [
+        existing.rows[0].id,
+      ]);
+    } else {
+      await client.query(
+        "INSERT INTO message_reactions (message_id, user_id, emoji) VALUES ($1, $2, $3)",
+        [message_id, userId, emoji]
+      );
+    }
+
+    const reactions = await client.query(
+      `SELECT emoji, COUNT(*)::int AS count,
+              ARRAY_AGG(user_id) AS user_ids
+       FROM message_reactions WHERE message_id = $1
+       GROUP BY emoji ORDER BY MIN(created_at)`,
+      [message_id]
+    );
+
+    broadcastMessageChange("message-reactions", message, {
+      id: message_id,
+      group_id: message.group_id,
+      reactions: reactions.rows,
+    });
+
+    res.json({ reactions: reactions.rows });
+  } catch (error) {
+    console.error("Error toggling reaction:", error);
+    res.status(500).json({ error: "Internal server error" });
+  } finally {
+    client.release();
+  }
+};
+
 module.exports = {
   sendGroupMessage,
   sendGroupFile,
@@ -873,4 +1240,7 @@ module.exports = {
   getUnreadCount,
   getAllUsers,
   syncmarking,
+  editMessage,
+  deleteMessage,
+  toggleReaction,
 };

@@ -15,12 +15,24 @@ const createRateLimiter = require("./middleware/rateLimiter");
 app.use(cors());
 app.use(express.json());
 app.use(requestLogger);
-app.use(createRateLimiter({ windowMs: 15 * 60 * 1000, max: 200, keyPrefix: "global" }));
+app.use(
+  createRateLimiter({
+    windowMs: 15 * 60 * 1000,
+    max: 200,
+    keyPrefix: "global",
+  }),
+);
 
 // Socket.IO setup
 const io = new Server(server, {
   cors: {
-    origin: ["http://localhost:5174"], // Add your Netlify URL
+    // Vite defaults to 5173; 5174/5175 are the fallbacks it picks when
+    // that port is taken. Add your deployed front-end origin here too.
+    origin: [
+      "http://localhost:5173",
+      "http://localhost:5174",
+      "http://localhost:5175",
+    ],
     methods: ["GET", "POST"],
   },
 });
@@ -57,20 +69,26 @@ io.on("connection", async (socket) => {
   onlineUsers.get(userId).push(socket.id);
 
   console.log("User connected:", userId, "and", socket.id);
-  try {
-    const chatUserIds = await getAllUserChats(userId);
-    chatUserIds.forEach((otherUserId) => {
-      const roomId = [userId, otherUserId].sort().join("-");
-      socket.join(`private-${roomId}`);
-      console.log(
-        `Socket ${socket.id} auto-joined private chat room ${roomId}`,
-      );
-    });
-  } catch (err) {
-    console.error("Error fetching user chats:", err);
-  }
+
+  /* All socket.on(...) registrations below used to come AFTER the `await
+     getAllUserChats(...)` further down. Socket.IO dispatches an incoming
+     event synchronously against whatever listeners exist on the socket at
+     the moment it arrives — there is no server-side buffering for events
+     received before a listener is registered, unlike the client-side
+     buffering socket.io-client does for emits sent before "connect". So a
+     client that emits (say) "join-group" immediately upon connecting could
+     have that event silently dropped if this DB query — which can take
+     anywhere from a few ms to multiple seconds against Supabase — hadn't
+     resolved yet. This was invisible as long as every emit happened well
+     after page load (opening a chat, starting a call), but session 10's
+     Chat.jsx joins every group room proactively right after connecting,
+     which lands squarely in this window and made the drop real and
+     reproducible in live two-tab testing. Registering listeners first,
+     synchronously, closes the gap entirely regardless of how slow the
+     query is. */
 
   // Join a group room
+
   socket.on("join-group", (group_id) => {
     socket.join(`group-${group_id}`);
     console.log(`User ${socket.id} joined group ${group_id}`);
@@ -118,19 +136,36 @@ io.on("connection", async (socket) => {
     // socket.to(`private-${roomId}`).emit("receive-private-message", data);
   });
 
-    // Register WebRTC calling event handlers
-    const registerCallHandlers = require("./socket/callHandler");
-    registerCallHandlers(io, socket);
+  // Register WebRTC calling event handlers
+  const registerCallHandlers = require("./socket/callHandler");
+  registerCallHandlers(io, socket);
 
-    socket.on("disconnect", () => {
-      const arr = onlineUsers.get(userId) || [];
-      onlineUsers.set(
-        userId,
-        arr.filter((id) => id !== socket.id),
-      );
-      if (onlineUsers.get(userId).length === 0) onlineUsers.delete(userId);
-    });
+  socket.on("disconnect", () => {
+    const arr = onlineUsers.get(userId) || [];
+    onlineUsers.set(
+      userId,
+      arr.filter((id) => id !== socket.id),
+    );
+    if (onlineUsers.get(userId).length === 0) onlineUsers.delete(userId);
   });
+
+  // Auto-join every private-chat room this user could receive a message in.
+  // Deliberately after every socket.on(...) above (see the comment at the
+  // top of this handler) — this can take a while against Supabase, and
+  // nothing here depends on it having finished.
+  try {
+    const chatUserIds = await getAllUserChats(userId);
+    chatUserIds.forEach((otherUserId) => {
+      const roomId = [userId, otherUserId].sort().join("-");
+      socket.join(`private-${roomId}`);
+      console.log(
+        `Socket ${socket.id} auto-joined private chat room ${roomId}`,
+      );
+    });
+  } catch (err) {
+    console.error("Error fetching user chats:", err);
+  }
+});
 
 // io is available to routes via socketState.getIO() — no need to export from app.js
 

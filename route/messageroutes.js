@@ -18,6 +18,9 @@ const {
   getUnreadCount,
   getAllUsers,
   syncmarking,
+  editMessage,
+  deleteMessage,
+  toggleReaction,
 } = require("../controller/messagecontroller");
 const { streamOrDownloadFile } = require("../controller/fileController");
 
@@ -43,6 +46,13 @@ router.get("/unread-count", getUnreadCount);
 router.get("/users/all", getAllUsers);
 router.get("/unread", getUnreadMessages);
 router.get("/syncread/:otheruserid", syncmarking);
+
+// Edit / delete a message, and react to one. Permission rules live in the
+// controller (author-only for edits; author, owner, or an admin the owner
+// granted the right, for deletes).
+router.patch("/:message_id", editMessage);
+router.delete("/:message_id", deleteMessage);
+router.post("/:message_id/reactions", toggleReaction);
 
 // Mark messages as read
 router.put("/read/group/:group_id", markGroupAsRead);

@@ -60,6 +60,21 @@ function registerCallHandlers(io, socket) {
       socket.to(`call-${callId}`).emit("call-status-update", payload);
     }
   });
+
+  // 5. Ephemeral in-call chat. Relayed to the call room and never persisted —
+  // these messages belong to the call, not to the conversation, and must not
+  // land in the `messages` table.
+  socket.on("call-message", ({ callId, text, author }) => {
+    if (!callId || !text) return;
+
+    socket.to(`call-${callId}`).emit("call-message", {
+      callId,
+      text: String(text).slice(0, 2000),
+      author,
+      from: socket.handshake.query.userId,
+      at: Date.now(),
+    });
+  });
 }
 
 module.exports = registerCallHandlers;

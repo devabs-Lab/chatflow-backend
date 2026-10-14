@@ -1,5 +1,56 @@
 const pool = require("../db/dbconfig");
 const { getIO, onlineUsers } = require("../socket/socketState");
+const { createSignedStorageUrl } = require("../utils/storageUrls");
+
+/* ---------------------------------------------------------------------------
+   Call-log messages.
+
+   A resolved 1:1 call (missed, declined, or ended) gets one real row in
+   `messages` — not a separate table, because `message_type` on that table has
+   a CHECK constraint (text/image/file/audio/video) and this is a production
+   database with real users on it; adding a value means an ALTER TABLE against
+   live data, which is not something to do without asking first. So this
+   reuses `message_type: 'text'` and encodes the event in `content` behind a
+   prefix (U+2063, an invisible separator no keyboard or paste can produce),
+   which the client detects and renders as a call pill instead of a bubble —
+   see utils/messagePreview.js / MessageRenderer.jsx on the client.
+
+   Writing a real row (instead of each client synthesizing its own local
+   entry, which is what the previous approach did) is what makes this
+   reliable: it goes through the exact same insert -> broadcast -> "last
+   message" -> history-fetch pipeline every other message already uses, so
+   both parties see it, and it is still there if you open the thread later.
+   Group calls are skipped — there is no per-group message thread yet.
+   --------------------------------------------------------------------------- */
+const CALL_EVENT_PREFIX = "⁣call:";
+
+async function writeCallLogMessage(client, { callerId, receiverId, callType, status, duration }) {
+  if (!callerId || !receiverId) return;
+
+  const content =
+    CALL_EVENT_PREFIX +
+    JSON.stringify({ call_type: callType, call_status: status, duration: duration || 0 });
+
+  const inserted = await client.query(
+    `INSERT INTO messages (sender_id, receiver_id, content, message_type, delivered_at, is_read)
+     VALUES ($1, $2, $3, 'text', CURRENT_TIMESTAMP, false) RETURNING *`,
+    [callerId, receiverId, content],
+  );
+
+  const sender = await client.query("SELECT username FROM users WHERE userid = $1", [callerId]);
+  const messageWithSender = {
+    ...inserted.rows[0],
+    sender_username: sender.rows[0]?.username,
+  };
+
+  /* Unlike a normal sent message, neither side has this optimistically
+     rendered already — both need the live push. */
+  [callerId, receiverId].forEach((uid) => {
+    (onlineUsers.get(uid) || []).forEach((sId) =>
+      getIO().to(sId).emit("receive-private-message", messageWithSender),
+    );
+  });
+}
 
 // Initiate a voice/video call
 const initiateCall = async (req, res) => {
@@ -45,7 +96,7 @@ const initiateCall = async (req, res) => {
       callId: call.id,
       callerId: caller_id,
       callerUsername: caller_username,
-      callerAvatar: callerUser.rows[0]?.avatar_url,
+      callerAvatar: await createSignedStorageUrl(callerUser.rows[0]?.avatar_url),
       callType: call_type,
       groupId: group_id,
     };
@@ -155,6 +206,15 @@ const rejectCall = async (req, res) => {
       callerSockets.forEach((sId) => {
         getIO().to(sId).emit("call-rejected", { callId: call_id, userId: user_id });
       });
+
+      if (!call.group_id) {
+        await writeCallLogMessage(client, {
+          callerId: call.caller_id,
+          receiverId: call.receiver_id,
+          callType: call.call_type,
+          status: "declined",
+        });
+      }
     }
 
     res.json({ message: "Call rejected successfully" });
@@ -179,6 +239,17 @@ const endCall = async (req, res) => {
       [call_id, user_id]
     );
 
+    const callResult = await client.query(
+      "SELECT caller_id, receiver_id, group_id, call_type, call_status FROM calls WHERE id = $1",
+      [call_id]
+    );
+    if (callResult.rows.length === 0) {
+      res.json({ message: "Call left successfully" });
+      return;
+    }
+    const c = callResult.rows[0];
+    const isDirectCall = !!c.receiver_id && !c.group_id;
+
     // 2. Fetch remaining active participants
     const activeParticipants = await client.query(
       "SELECT user_id FROM call_participants WHERE call_id = $1 AND left_at IS NULL",
@@ -193,24 +264,62 @@ const endCall = async (req, res) => {
       });
     });
 
-    // If no one is left in the call, end the call
-    if (activeParticipants.rows.length === 0) {
+    /* A direct (1:1) call has no "some participants remain" state — there
+       are only ever two people in it, so either one leaving ends the call
+       for both. Waiting for "last one out" (the original condition here)
+       meant the call row only ever reached 'ended' if *both* sides happened
+       to call this endpoint independently, which in practice almost never
+       happens — the side that did not click "leave" just gets the
+       `user-left-call` socket event and tears its own UI down locally,
+       never hitting this endpoint at all. The call stayed 'ongoing' in the
+       database forever, and no call-log message could ever be written for
+       it. Group calls keep the original "last one out" behavior. */
+    const shouldEnd = isDirectCall || activeParticipants.rows.length === 0;
+
+    if (shouldEnd && c.call_status === "ongoing") {
       await client.query(
         "UPDATE calls SET call_status = 'ended', ended_at = CURRENT_TIMESTAMP WHERE id = $1 AND call_status = 'ongoing'",
         [call_id]
       );
 
-      // Notify caller/receivers if direct call
-      const callResult = await client.query("SELECT caller_id, receiver_id FROM calls WHERE id = $1", [call_id]);
-      if (callResult.rows.length > 0) {
-        const c = callResult.rows[0];
-        const usersToNotify = [c.caller_id, c.receiver_id].filter(Boolean);
-        usersToNotify.forEach((uid) => {
-          const uSockets = onlineUsers.get(uid) || [];
-          uSockets.forEach((sId) => {
-            getIO().to(sId).emit("call-ended", { callId: call_id });
-          });
+      const usersToNotify = [c.caller_id, c.receiver_id].filter(Boolean);
+      usersToNotify.forEach((uid) => {
+        const uSockets = onlineUsers.get(uid) || [];
+        uSockets.forEach((sId) => {
+          getIO().to(sId).emit("call-ended", { callId: call_id });
         });
+      });
+
+      if (isDirectCall) {
+        /* Did the receiver ever actually join? If not, this was never
+           answered — a cancelled-by-caller or a plain no-answer, both of
+           which read the same way from either side: "missed". If they did,
+           the call really happened — log it with how long it lasted. */
+        const receiverJoin = await client.query(
+          "SELECT joined_at FROM call_participants WHERE call_id = $1 AND user_id = $2 ORDER BY joined_at ASC LIMIT 1",
+          [call_id, c.receiver_id]
+        );
+
+        if (receiverJoin.rows.length === 0) {
+          await writeCallLogMessage(client, {
+            callerId: c.caller_id,
+            receiverId: c.receiver_id,
+            callType: c.call_type,
+            status: "missed",
+          });
+        } else {
+          const durationSeconds = Math.max(
+            0,
+            Math.round((Date.now() - new Date(receiverJoin.rows[0].joined_at).getTime()) / 1000)
+          );
+          await writeCallLogMessage(client, {
+            callerId: c.caller_id,
+            receiverId: c.receiver_id,
+            callType: c.call_type,
+            status: "ended",
+            duration: durationSeconds,
+          });
+        }
       }
     }
 
@@ -248,7 +357,20 @@ const getCallHistory = async (req, res) => {
       [user_id, parseInt(limit), parseInt(offset)]
     );
 
-    res.json(history.rows);
+    /* uc.avatar_url / ur.avatar_url are raw Supabase storage paths, not
+       usable URLs — every other place that returns an avatar signs it first
+       (see usercontroller.js, messagecontroller.js); this endpoint just
+       hadn't been, so the browser tried to load the storage key as an image
+       and showed a broken-image icon. */
+    const rows = await Promise.all(
+      history.rows.map(async (row) => ({
+        ...row,
+        caller_avatar: await createSignedStorageUrl(row.caller_avatar),
+        receiver_avatar: await createSignedStorageUrl(row.receiver_avatar),
+      })),
+    );
+
+    res.json(rows);
   } catch (error) {
     console.error("Error fetching call history:", error);
     res.status(500).json({ error: "Internal server error" });
